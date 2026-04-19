@@ -1,37 +1,53 @@
+mod commands;
+mod global;
+
 use clap::{Parser, Subcommand};
+use global::GlobalArgs;
 
 #[derive(Parser)]
-#[command(name = "enscrive-docs", version, about)]
+#[command(
+    name = "enscrive-docs",
+    version,
+    about = "Retrieval-native documentation backed by Enscrive"
+)]
 struct Cli {
+    #[command(flatten)]
+    global: GlobalArgs,
+
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    Init,
-    Ingest,
-    Serve,
-    Watch,
-    Search { query: String },
-    View,
-    Eval,
-    Version,
-    Config,
+    /// Scaffold an enscrive-docs.toml in the current directory
+    Init(commands::init::InitArgs),
+
+    /// Push the configured markdown directories into Enscrive collections
+    Ingest(commands::ingest::IngestArgs),
+
+    /// Serve the docs as HTML + JSON search + /llms.txt
+    Serve(commands::serve::ServeArgs),
+
+    /// One-shot semantic search against the configured collections
+    Search(commands::search::SearchArgs),
+
+    /// Inspect the resolved configuration
+    Config(commands::config::ConfigArgs),
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    match cli.command {
-        Command::Init => println!("init: not implemented"),
-        Command::Ingest => println!("ingest: not implemented"),
-        Command::Serve => println!("serve: not implemented"),
-        Command::Watch => println!("watch: not implemented"),
-        Command::Search { query } => println!("search: not implemented (query: {query})"),
-        Command::View => println!("view: not implemented"),
-        Command::Eval => println!("eval: not implemented"),
-        Command::Version => println!("version: not implemented"),
-        Command::Config => println!("config: not implemented"),
+    let result = match cli.command {
+        Command::Init(args) => commands::init::run(cli.global, args).await,
+        Command::Ingest(args) => commands::ingest::run(cli.global, args).await,
+        Command::Serve(args) => commands::serve::run(cli.global, args).await,
+        Command::Search(args) => commands::search::run(cli.global, args).await,
+        Command::Config(args) => commands::config::run(cli.global, args).await,
+    };
+    if let Err(e) = result {
+        eprintln!("error: {e}");
+        std::process::exit(1);
     }
 }

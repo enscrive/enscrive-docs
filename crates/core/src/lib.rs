@@ -1,8 +1,21 @@
-//! enscrive-docs-core
+//! Core types, HTTP client, and config loader for the enscrive-docs CLI.
 //!
-//! HTTP client, types, and config for the enscrive-docs CLI and embedders.
-//! Talks to the public Enscrive API at api.enscrive.io.
+//! This crate is published as a library so other Rust applications can call
+//! the public Enscrive API and load enscrive-docs config files without
+//! depending on the rendering layer or the CLI binary.
 
 pub mod client;
 pub mod config;
+pub mod error;
 pub mod types;
+
+pub use client::{EnscriveClient, IngestProgress};
+pub use config::{
+    CollectionConfig, Config, EnscriveAuthConfig, SearchConfig, SiteConfig, ThemeConfig,
+    VersionConfig, VoiceConfig,
+};
+pub use error::{EnscriveError, Result};
+pub use types::{
+    CollectionDetail, CreateVoiceApiRequest, IngestDocument, IngestProgressEvent, IngestRequest,
+    SearchFilter, SearchQuery, SearchResultItem, SearchResults, VoiceConfigApi, VoiceDetail,
+};

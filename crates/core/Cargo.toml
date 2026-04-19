@@ -1,0 +1,15 @@
+[package]
+name = "enscrive-docs-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTTP client, types, and config for enscrive-docs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }

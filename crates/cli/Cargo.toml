@@ -1,0 +1,21 @@
+[package]
+name = "enscrive-docs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Turn any markdown directory into a retrieval-native documentation site backed by Enscrive"
+readme = "../../README.md"
+keywords = ["docs", "documentation", "search", "embeddings", "enscrive"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "enscrive-docs"
+path = "src/main.rs"
+
+[dependencies]
+enscrive-docs-core = { path = "../core", version = "0.0.1" }
+enscrive-docs-render = { path = "../render", version = "0.0.1" }
+clap = { workspace = true }
+tokio = { workspace = true }

@@ -1,0 +1,11 @@
+[package]
+name = "enscrive-docs-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Markdown-to-HTML rendering and theming for enscrive-docs"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }

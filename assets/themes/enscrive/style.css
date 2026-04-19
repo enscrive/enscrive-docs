@@ -1,0 +1,31 @@
+/* enscrive-docs enscrive-brand theme
+ *
+ * Brand variant for our own deployments (api.enscrive.io/docs and
+ * docs.enscrive.io). Lifts the slate-950 / sky-400 palette and prose
+ * conventions from the existing enscrive-developer portal.
+ *
+ * v1: thin overlay over the neutral theme variables. Phase B will
+ * deepen this by lifting prose-enscrive (main.css:76-178) wholesale.
+ */
+
+@import url("../neutral/style.css");
+
+:root {
+  --accent: #38bdf8;
+  --accent-soft: rgba(56, 189, 248, 0.16);
+  --bg: #030712;
+  --bg-elev: #0f172a;
+  --bg-code: #111827;
+  --fg: #e2e8f0;
+  --fg-muted: #94a3b8;
+  --fg-subtle: #64748b;
+  --border: #1e293b;
+  --border-strong: #334155;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    /* Brand variant intentionally stays dark even in light mode for now.
+     * Phase B may add a paired light brand palette. */
+  }
+}

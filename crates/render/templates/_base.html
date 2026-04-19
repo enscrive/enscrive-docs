@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block page_title %}{{ ctx.site_title }}{% endblock %}</title>
+  <meta name="description" content="{% block page_description %}{{ ctx.site_description }}{% endblock %}">
+  <link rel="stylesheet" href="{{ ctx.asset_base }}/{{ ctx.theme_css_path }}">
+  {% if !ctx.theme_variables.is_empty() %}
+  <style>{{ ctx.theme_variables }}</style>
+  {% endif %}
+  {% if !ctx.custom_css.is_empty() %}
+  <style>{{ ctx.custom_css }}</style>
+  {% endif %}
+  <script defer src="{{ ctx.asset_base }}/js/search.js" data-search-endpoint="{{ ctx.base_path }}/search"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="ed-header">
+    <div class="ed-header-inner">
+      <a class="ed-brand" href="{{ ctx.base_path }}/">{{ ctx.site_title }}</a>
+      <button class="ed-search-trigger" data-search-trigger aria-label="Search documentation">
+        <span>Search</span>
+        <kbd>⌘K</kbd>
+      </button>
+    </div>
+  </header>
+  <div class="ed-shell">
+    <nav class="ed-sidebar" aria-label="Documentation navigation">
+      <ul>
+        {% for item in ctx.nav %}
+        <li{% if item.current %} class="current"{% endif %}>
+          <a href="{{ item.url }}">{{ item.title }}</a>
+        </li>
+        {% endfor %}
+      </ul>
+    </nav>
+    <main id="main" class="ed-main">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  <div id="ed-search-overlay" class="ed-search-overlay" role="dialog" aria-modal="true" aria-label="Search" hidden>
+    <div class="ed-search-panel">
+      <input type="search" id="ed-search-input" placeholder="Search docs..." autocomplete="off" spellcheck="false" aria-label="Search query">
+      <ul id="ed-search-results" class="ed-search-results"></ul>
+      <div class="ed-search-hint">Powered by Enscrive · semantic search</div>
+    </div>
+  </div>
+</body>
+</html>

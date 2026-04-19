@@ -1,0 +1,20 @@
+{% extends "_base.html" %}
+
+{% block content %}
+<section class="ed-hero">
+  <h1>{{ ctx.site_title }}</h1>
+  <p class="ed-hero-tagline">{{ ctx.site_description }}</p>
+  <button class="ed-search-trigger ed-search-trigger-primary" data-search-trigger aria-label="Search documentation">
+    <span>Search the docs</span>
+    <kbd>⌘K</kbd>
+  </button>
+</section>
+<section class="ed-index-list">
+  <h2>All pages</h2>
+  <ul>
+    {% for item in ctx.nav %}
+    <li><a href="{{ item.url }}">{{ item.title }}</a></li>
+    {% endfor %}
+  </ul>
+</section>
+{% endblock %}

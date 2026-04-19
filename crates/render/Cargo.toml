@@ -4,8 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Markdown-to-HTML rendering and theming for enscrive-docs"
+description = "Markdown-to-HTML rendering, theming, and embedded assets for enscrive-docs"
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+ammonia = "4"
+askama = "0.12"
+rust-embed = { version = "8", features = ["compression", "interpolate-folder-path"] }
+gray_matter = { version = "0.2", default-features = false, features = ["yaml"] }
+slug = "0.1"

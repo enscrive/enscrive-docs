@@ -30,6 +30,8 @@ pub struct Config {
     pub versions: Vec<VersionConfig>,
     #[serde(default)]
     pub search: SearchConfig,
+    #[serde(default)]
+    pub serve: ServeConfig,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -150,6 +152,13 @@ pub struct SearchConfig {
     pub results_per_page: Option<u32>,
     #[serde(default)]
     pub include_snippets: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct ServeConfig {
+    /// Port to bind. CLI --port and $PORT env override this.
+    #[serde(default)]
+    pub port: Option<u16>,
 }
 
 impl Config {

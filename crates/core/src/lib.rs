@@ -11,8 +11,8 @@ pub mod types;
 
 pub use client::{EnscriveClient, IngestProgress};
 pub use config::{
-    CollectionConfig, Config, EnscriveAuthConfig, SearchConfig, SiteConfig, ThemeConfig,
-    VersionConfig, VoiceConfig,
+    CollectionConfig, Config, EnscriveAuthConfig, SearchConfig, ServeConfig, SiteConfig,
+    ThemeConfig, VersionConfig, VoiceConfig,
 };
 pub use error::{EnscriveError, Result};
 pub use types::{

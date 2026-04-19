@@ -23,11 +23,16 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use walkdir::WalkDir;
 
+/// Built-in default. Chosen to dodge the crowded 8080/3000/8000 cluster;
+/// not in IANA's registry for any popular dev tool. Override with
+/// --port, the PORT env var, or [serve] port in enscrive-docs.toml.
+const DEFAULT_PORT: u16 = 3737;
+
 #[derive(Args, Clone, Debug)]
 pub struct ServeArgs {
-    /// Port to bind
-    #[arg(long, default_value_t = 8080)]
-    pub port: u16,
+    /// Port to bind. Resolution: --port > $PORT > [serve] port > 3737.
+    #[arg(long, env = "PORT")]
+    pub port: Option<u16>,
 
     /// Bind address
     #[arg(long, default_value = "127.0.0.1")]
@@ -156,7 +161,11 @@ pub async fn run(global: GlobalArgs, args: ServeArgs) -> Result<(), String> {
 
     let app = build_router(state.clone(), &base_path);
 
-    let bind_addr: SocketAddr = format!("{}:{}", args.bind, args.port)
+    let port = args
+        .port
+        .or(cfg.serve.port)
+        .unwrap_or(DEFAULT_PORT);
+    let bind_addr: SocketAddr = format!("{}:{}", args.bind, port)
         .parse()
         .map_err(|e| format!("invalid bind: {e}"))?;
     println!(

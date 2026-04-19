@@ -5,7 +5,7 @@
 
 `enscrive-docs` is a single Rust binary that ingests your markdown into
 [Enscrive](https://enscrive.io) collections, configures voices for tuned
-semantic search, and serves the docs as polished HTML, a JSON search API,
+neural search, and serves the docs as polished HTML, a JSON search API,
 an `/llms.txt` index, and a sitemap — all from one process, with zero
 runtime dependencies beyond the public Enscrive API.
 
@@ -13,10 +13,10 @@ runtime dependencies beyond the public Enscrive API.
 
 ## Why
 
-Coding agents in 2026 don't read your docs page-by-page — they semantically
-search them. `enscrive-docs` makes that search a first-class capability of
-your `/docs` endpoint, not an afterthought. Humans see a polished site;
-agents query a JSON endpoint backed by Enscrive's neural search.
+Coding agents in 2026 don't read your docs page-by-page — they neural-search
+them. `enscrive-docs` makes that search a first-class capability of your
+`/docs` endpoint, not an afterthought. Humans see a polished site; agents
+query a JSON endpoint backed by Enscrive's neural search.
 
 ## Install (when shipped)
 

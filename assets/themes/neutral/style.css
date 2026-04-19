@@ -63,6 +63,21 @@ html, body {
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
+/* When a Text Fragment URL (#:~:text=...) lands on a passage, apply an
+ * on-brand highlight instead of the browser default yellow. Supported by
+ * Chromium-based browsers and Safari; ignored by Firefox.
+ */
+::target-text {
+  background: var(--accent-soft);
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
 .skip-link {
   position: absolute;
   top: -40px;

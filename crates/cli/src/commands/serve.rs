@@ -429,7 +429,17 @@ async fn handle_search(
                         .cloned()
                         .unwrap_or_else(|| r.document_id.clone());
                     let page = state.pages.get(&slug);
-                    let url = page.map(|p| p.meta.url(&state.base_path));
+                    // Build URL with a Text Fragment (#:~:text=...) so
+                    // chromium-based browsers and Safari scroll to and
+                    // visually highlight the matching passage. Firefox
+                    // ignores the fragment and just lands on the page.
+                    let url = page.map(|p| {
+                        let base = p.meta.url(&state.base_path);
+                        match build_text_fragment(&r.content) {
+                            Some(frag) => format!("{base}#:~:text={frag}"),
+                            None => base,
+                        }
+                    });
                     let title = page.map(|p| p.meta.title.clone());
                     let snippet =
                         r.content.chars().take(280).collect::<String>();
@@ -670,6 +680,157 @@ fn make_slug(rel_path: &str, url_prefix: Option<&str>) -> String {
         }
     } else {
         cleaned.to_string()
+    }
+}
+
+/// Extract a clean text-fragment string from a chunk of markdown content,
+/// suitable for appending after `#:~:text=` in a URL. The result must
+/// match visible text in the rendered page (markdown sigils stripped) so
+/// the browser can find and scroll to it.
+///
+/// Strategy: walk the chunk looking for the first run of "real" prose —
+/// strip leading markdown markers (#, >, -, *, digits.) per line, drop
+/// inline backticks/asterisks, and grab a 4-12 word phrase between 20
+/// and 80 characters long. Returns None if no usable phrase is found.
+fn build_text_fragment(content: &str) -> Option<String> {
+    fn strip_inline_marks(s: &str) -> String {
+        s.chars()
+            .filter(|c| !matches!(c, '`' | '*' | '_' | '~' | '[' | ']' | '<' | '>'))
+            .collect()
+    }
+    fn strip_line_prefix(line: &str) -> &str {
+        let mut s = line.trim_start();
+        loop {
+            let stripped = s
+                .strip_prefix('#')
+                .or_else(|| s.strip_prefix('>'))
+                .or_else(|| s.strip_prefix('-'))
+                .or_else(|| s.strip_prefix('*'))
+                .or_else(|| s.strip_prefix('+'));
+            match stripped {
+                Some(rest) => s = rest.trim_start(),
+                None => break,
+            }
+        }
+        // Skip leading "1. " / "12. " ordered-list markers.
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i > 0 && i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1] == b' ' {
+            s = &s[i + 2..];
+        }
+        s.trim()
+    }
+
+    for raw_line in content.lines() {
+        let cleaned = strip_inline_marks(strip_line_prefix(raw_line));
+        let normalized: String =
+            cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.len() < 20 {
+            continue;
+        }
+        // Take up to ~80 chars on a word boundary, but never less than 20.
+        let take = if normalized.len() <= 80 {
+            normalized.clone()
+        } else {
+            let mut end = 80;
+            while end > 20 && !normalized.is_char_boundary(end) {
+                end -= 1;
+            }
+            let truncated = &normalized[..end];
+            // Back up to the last space so we don't cut mid-word.
+            match truncated.rfind(' ') {
+                Some(sp) if sp > 20 => truncated[..sp].to_string(),
+                _ => truncated.to_string(),
+            }
+        };
+        return Some(percent_encode_fragment(&take));
+    }
+    None
+}
+
+/// Percent-encode for a URL fragment value. Spaces become %20 (not '+'
+/// — '+' has no special meaning in fragments). We deliberately encode
+/// '&' and '#' because they would terminate the fragment.
+fn percent_encode_fragment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for byte in s.bytes() {
+        let safe = matches!(
+            byte,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'
+        );
+        if safe {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fragment_strips_heading_marker() {
+        // First line is too short (<20 chars); helper falls through to body.
+        let f = build_text_fragment(
+            "# enscrive-docs\n\nThis is the body that should be picked up.",
+        )
+        .unwrap();
+        assert!(f.starts_with("This"), "got: {f}");
+    }
+
+    #[test]
+    fn fragment_picks_up_long_heading() {
+        let f = build_text_fragment("## Configuring voices and collections")
+            .unwrap();
+        assert!(f.starts_with("Configuring"), "got: {f}");
+    }
+
+    #[test]
+    fn fragment_skips_short_first_line() {
+        let f = build_text_fragment(
+            "# Hi\n\nThis is a much longer paragraph that should be the fragment target.",
+        )
+        .unwrap();
+        assert!(f.contains("longer"), "got: {f}");
+    }
+
+    #[test]
+    fn fragment_strips_blockquote_and_inline_marks() {
+        let f = build_text_fragment("> Turn any **markdown** directory into a `tool`")
+            .unwrap();
+        let decoded = f.replace("%20", " ");
+        assert!(
+            decoded.starts_with("Turn any markdown directory into a tool"),
+            "got decoded: {decoded}"
+        );
+    }
+
+    #[test]
+    fn fragment_truncates_at_word_boundary() {
+        let long = "x".repeat(200);
+        let f = build_text_fragment(&format!("body word {long} more"));
+        // long line has no spaces beyond position 20, fragment will still be
+        // produced but short; just ensure we get something non-empty.
+        assert!(f.is_some());
+    }
+
+    #[test]
+    fn fragment_returns_none_on_empty() {
+        assert!(build_text_fragment("").is_none());
+        assert!(build_text_fragment("# \n#\n   \n").is_none());
+    }
+
+    #[test]
+    fn percent_encoding_handles_special_chars() {
+        assert_eq!(percent_encode_fragment("hello world"), "hello%20world");
+        assert_eq!(percent_encode_fragment("a&b#c"), "a%26b%23c");
+        assert_eq!(percent_encode_fragment("safe-chars_.~"), "safe-chars_.~");
     }
 }
 

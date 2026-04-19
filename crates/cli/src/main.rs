@@ -8,7 +8,7 @@ use global::GlobalArgs;
 #[command(
     name = "enscrive-docs",
     version,
-    about = "Retrieval-native documentation backed by Enscrive"
+    about = "Retrieval-native documentation backed by Enscrive neural search"
 )]
 struct Cli {
     #[command(flatten)]
@@ -29,7 +29,7 @@ enum Command {
     /// Serve the docs as HTML + JSON search + /llms.txt
     Serve(commands::serve::ServeArgs),
 
-    /// One-shot semantic search against the configured collections
+    /// One-shot neural search against the configured collections
     Search(commands::search::SearchArgs),
 
     /// Inspect the resolved configuration

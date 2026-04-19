@@ -6,7 +6,7 @@
 use crate::error::{EnscriveError, Result};
 use crate::types::{
     CollectionDetail, CreateVoiceApiRequest, IngestProgressEvent, IngestRequest, SearchQuery,
-    SearchResults, VoiceDetail,
+    SearchResults, SearchWithVoiceBody, VoiceDetail,
 };
 use futures_util::StreamExt;
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
@@ -199,6 +199,13 @@ impl EnscriveClient {
 
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResults> {
         self.send_typed::<SearchResults>(Method::POST, "/v1/search", Some(query))
+            .await
+    }
+
+    /// Voice-tuned search (POST /v1/voices/search). Uses the voice's
+    /// chunking+retrieval config rather than raw collection defaults.
+    pub async fn search_with_voice(&self, body: &SearchWithVoiceBody) -> Result<SearchResults> {
+        self.send_typed::<SearchResults>(Method::POST, "/v1/voices/search", Some(body))
             .await
     }
 

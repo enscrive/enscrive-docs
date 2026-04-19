@@ -173,6 +173,34 @@ pub struct SearchResultItem {
     pub below_threshold: bool,
 }
 
+/// Request body for POST /v1/voices/search — voice-tuned search.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SearchWithVoiceBody {
+    pub query: String,
+    pub voice_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    pub include_vectors: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filters: Option<SearchFilter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granularity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oversample_factor: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_threshold: Option<f32>,
+    #[serde(default)]
+    pub extended_results: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_floor: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hybrid_alpha: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct SearchResults {
     pub results: Vec<SearchResultItem>,

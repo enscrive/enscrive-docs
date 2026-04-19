@@ -9,7 +9,7 @@ use axum::{
 };
 use clap::Args;
 use enscrive_docs_core::{
-    Config, EnscriveClient, SearchFilter, SearchQuery as ApiSearchQuery,
+    Config, EnscriveClient, SearchFilter, SearchQuery as ApiSearchQuery, SearchWithVoiceBody,
 };
 use enscrive_docs_render::{
     embedded_asset, render_index, render_markdown, render_page, templates::build_nav, IndexContext,
@@ -64,6 +64,11 @@ struct EnscriveServer {
     collection_ids: HashMap<String, String>,
     /// voice_name -> voice_id
     voice_ids: HashMap<String, String>,
+    /// First configured collection's id, used as the default search scope
+    /// when the request does not specify ?collection=name.
+    default_collection_id: Option<String>,
+    /// Per-collection default voice name (lookup by collection name).
+    collection_default_voice: HashMap<String, String>,
     default_voice_name: Option<String>,
     default_limit: u32,
 }
@@ -89,6 +94,8 @@ pub async fn run(global: GlobalArgs, args: ServeArgs) -> Result<(), String> {
     let voices = client.list_voices().await.map_err(|e| e.to_string())?;
 
     let mut collection_ids = HashMap::new();
+    let mut collection_default_voice = HashMap::new();
+    let mut default_collection_id: Option<String> = None;
     for entry in &cfg.collections {
         let id = collections
             .iter()
@@ -100,6 +107,10 @@ pub async fn run(global: GlobalArgs, args: ServeArgs) -> Result<(), String> {
                     entry.name
                 )
             })?;
+        if default_collection_id.is_none() {
+            default_collection_id = Some(id.clone());
+        }
+        collection_default_voice.insert(entry.name.clone(), entry.voice.clone());
         collection_ids.insert(entry.name.clone(), id);
     }
     let mut voice_ids = HashMap::new();
@@ -154,7 +165,13 @@ pub async fn run(global: GlobalArgs, args: ServeArgs) -> Result<(), String> {
             client,
             collection_ids,
             voice_ids,
-            default_voice_name: cfg.search.default_voice.clone(),
+            default_collection_id,
+            collection_default_voice,
+            default_voice_name: cfg
+                .search
+                .default_voice
+                .clone()
+                .or_else(|| cfg.collections.first().map(|c| c.voice.clone())),
             default_limit,
         }),
     };
@@ -340,30 +357,66 @@ async fn handle_search(
         }
     };
 
-    let collection_id = p
-        .collection
+    // Default to the configured collection (the first one) when the request
+    // does not specify ?collection=name. Without a collection filter the
+    // upstream search RPC errors out on multi-collection tenants.
+    let collection_name = p.collection.clone();
+    let collection_id = collection_name
         .as_deref()
-        .and_then(|name| state.enscrive.collection_ids.get(name).cloned());
+        .and_then(|name| state.enscrive.collection_ids.get(name).cloned())
+        .or_else(|| state.enscrive.default_collection_id.clone());
 
-    let _voice_id = p
+    // Resolve the voice: explicit ?voice= > collection's configured voice >
+    // search.default_voice > none.
+    let voice_name = p
         .voice
+        .clone()
+        .or_else(|| {
+            collection_name
+                .as_deref()
+                .and_then(|n| state.enscrive.collection_default_voice.get(n).cloned())
+        })
+        .or_else(|| state.enscrive.default_voice_name.clone());
+    let voice_id = voice_name
         .as_deref()
-        .or(state.enscrive.default_voice_name.as_deref())
         .and_then(|name| state.enscrive.voice_ids.get(name).cloned());
 
     let limit = p.limit.unwrap_or(state.enscrive.default_limit);
 
-    let api_query = ApiSearchQuery {
-        query: query.clone(),
-        collection_id,
-        filters: Some(SearchFilter::default()),
-        limit: Some(limit),
-        score_threshold: None,
-        include_vectors: false,
-        ..Default::default()
+    // Use voice-tuned search when a voice is resolved; fall back to plain
+    // /v1/search otherwise. Voice-tuned search is the differentiated
+    // capability (Enscrive eval-tunable retrieval).
+    let result = if let Some(voice_id) = voice_id {
+        let body = SearchWithVoiceBody {
+            query: query.clone(),
+            voice_id,
+            collection_id: collection_id.clone(),
+            limit: Some(limit),
+            include_vectors: false,
+            filters: None,
+            granularity: None,
+            oversample_factor: None,
+            score_threshold: None,
+            extended_results: false,
+            score_floor: None,
+            hybrid_alpha: None,
+            resolution: None,
+        };
+        state.enscrive.client.search_with_voice(&body).await
+    } else {
+        let api_query = ApiSearchQuery {
+            query: query.clone(),
+            collection_id,
+            filters: Some(SearchFilter::default()),
+            limit: Some(limit),
+            score_threshold: None,
+            include_vectors: false,
+            ..Default::default()
+        };
+        state.enscrive.client.search(&api_query).await
     };
 
-    match state.enscrive.client.search(&api_query).await {
+    match result {
         Ok(results) => {
             let items = results
                 .results

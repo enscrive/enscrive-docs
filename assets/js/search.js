@@ -119,11 +119,20 @@
       renderState("Searching...", "ed-search-loading");
       try {
         const res = await fetch(endpoint + "?q=" + encodeURIComponent(query));
-        if (!res.ok) {
-          renderState("Search failed (HTTP " + res.status + ").");
+        let data;
+        try {
+          data = await res.json();
+        } catch (_) {
+          renderState("Search failed (HTTP " + res.status + " — non-JSON response).");
           return;
         }
-        const data = await res.json();
+        if (!res.ok || data.error) {
+          const detail = data && (data.detail || data.error)
+            ? (data.detail || data.error)
+            : "HTTP " + res.status;
+          renderState("Search failed: " + detail);
+          return;
+        }
         renderResults(data.results || []);
       } catch (e) {
         renderState("Search failed: " + (e && e.message ? e.message : "network error"));

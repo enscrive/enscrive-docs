@@ -121,12 +121,17 @@ glob = "**/*.md"
 # Each [[voices]] entry must already exist in your Enscrive tenant.
 # enscrive-docs verifies them on `ingest`. Future versions will optionally
 # create missing voices from this config.
+#
+# A note on score_threshold: the default of 0.0 surfaces all matches with
+# their natural relevance scores. Raise it (0.2-0.5) once you have enough
+# content to filter aggressively. Setting it too high before you have
+# many docs ingested will produce empty search results.
 [[voices]]
 name = "guides-voice"
-chunking_strategy = "paragraphs"
-# parameters = {{ min_tokens = "256", max_tokens = "1024" }}
-# score_threshold = 0.65
-# default_limit = 10
+chunking_strategy = "baseline"
+# parameters = {{ min_tokens = "256", max_tokens = "512" }}
+score_threshold = 0.0
+default_limit = 10
 
 [search]
 default_voice = "guides-voice"

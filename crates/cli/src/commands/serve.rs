@@ -725,12 +725,13 @@ fn build_pages(
                     "warn: slug collision \"{slug}\" between {prev} and {doc_id}; later wins"
                 );
             }
-            let meta = PageMeta::from_frontmatter(
+            let meta = PageMeta::build(
                 slug.clone(),
                 doc_id.clone(),
                 collection.url_prefix.clone(),
                 &rendered.frontmatter,
                 rendered.anchors,
+                rendered.leading_h1,
             );
             doc_id_to_slug.insert(doc_id.clone(), slug.clone());
             metas.push(meta.clone());

@@ -34,9 +34,24 @@ impl PageMeta {
         frontmatter: &Frontmatter,
         anchors: Vec<HeadingAnchor>,
     ) -> Self {
+        Self::build(slug, source_path, url_prefix, frontmatter, anchors, None)
+    }
+
+    /// Same as `from_frontmatter` but lets callers feed in the leading
+    /// h1 extracted from the rendered markdown as a title fallback.
+    /// Resolution: frontmatter title > leading h1 > slug-derived.
+    pub fn build(
+        slug: String,
+        source_path: String,
+        url_prefix: Option<String>,
+        frontmatter: &Frontmatter,
+        anchors: Vec<HeadingAnchor>,
+        leading_h1: Option<String>,
+    ) -> Self {
         let title = frontmatter
             .title
             .clone()
+            .or(leading_h1)
             .unwrap_or_else(|| derive_title_from_slug(&slug));
         let description = frontmatter.description.clone();
         let order = frontmatter.order.unwrap_or(0);

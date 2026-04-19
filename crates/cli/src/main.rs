@@ -29,6 +29,9 @@ enum Command {
     /// Serve the docs as HTML + JSON search + /llms.txt
     Serve(commands::serve::ServeArgs),
 
+    /// Serve + watch markdown files; auto-reload the browser on save
+    Watch(commands::watch::WatchArgs),
+
     /// One-shot neural search against the configured collections
     Search(commands::search::SearchArgs),
 
@@ -43,6 +46,7 @@ async fn main() {
         Command::Init(args) => commands::init::run(cli.global, args).await,
         Command::Ingest(args) => commands::ingest::run(cli.global, args).await,
         Command::Serve(args) => commands::serve::run(cli.global, args).await,
+        Command::Watch(args) => commands::watch::run(cli.global, args).await,
         Command::Search(args) => commands::search::run(cli.global, args).await,
         Command::Config(args) => commands::config::run(cli.global, args).await,
     };

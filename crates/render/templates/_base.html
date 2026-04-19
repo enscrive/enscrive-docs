@@ -13,6 +13,17 @@
   <style>{{ ctx.custom_css }}</style>
   {% endif %}
   <script defer src="{{ ctx.asset_base }}/js/search.js" data-search-endpoint="{{ ctx.base_path }}/search"></script>
+  {% if ctx.watch_mode %}
+  <script>
+    (function () {
+      try {
+        var es = new EventSource("{{ ctx.base_path }}/_events");
+        es.addEventListener("reload", function () { window.location.reload(); });
+        es.addEventListener("error", function () { /* will auto-reconnect */ });
+      } catch (_) { /* EventSource not supported; skip */ }
+    })();
+  </script>
+  {% endif %}
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>

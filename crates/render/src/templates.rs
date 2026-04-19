@@ -27,6 +27,9 @@ pub struct PageContext {
     pub page_html: String,
     pub page_anchors_html: String,
     pub nav: Vec<NavItem>,
+    /// Inject the dev-mode SSE reload listener. Only set true under
+    /// `enscrive-docs watch`; production `serve` leaves this false.
+    pub watch_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,6 +42,7 @@ pub struct IndexContext {
     pub theme_variables: String,
     pub custom_css: String,
     pub nav: Vec<NavItem>,
+    pub watch_mode: bool,
 }
 
 #[derive(Template)]

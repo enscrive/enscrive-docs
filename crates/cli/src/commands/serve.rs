@@ -1,9 +1,13 @@
 use crate::global::GlobalArgs;
+use arc_swap::ArcSwap;
 use axum::{
     body::Body,
     extract::{Path as AxPath, Query, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
-    response::{Html, IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        Html, IntoResponse, Response,
+    },
     routing::get,
     Json, Router,
 };
@@ -15,11 +19,15 @@ use enscrive_docs_render::{
     embedded_asset, render_index, render_markdown, render_page, templates::build_nav, IndexContext,
     Page, PageContext, PageMeta, ThemeVariant,
 };
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::{Any, CorsLayer};
 use walkdir::WalkDir;
 
@@ -44,37 +52,58 @@ pub struct ServeArgs {
 }
 
 #[derive(Clone)]
-struct AppState {
-    site_title: String,
-    site_description: String,
-    base_path: String,
-    asset_base: String,
-    theme_css_path: String,
-    theme_variables: String,
-    custom_css: String,
-    pages: Arc<HashMap<String, Page>>, // slug -> Page
-    pages_meta: Arc<Vec<PageMeta>>,
-    doc_id_to_slug: Arc<HashMap<String, String>>, // ingest doc_id -> page slug
-    enscrive: Arc<EnscriveServer>,
+pub struct AppState {
+    pub site_title: String,
+    pub site_description: String,
+    pub base_path: String,
+    pub asset_base: String,
+    pub theme_css_path: String,
+    pub theme_variables: String,
+    pub custom_css: String,
+    pub pages: Arc<ArcSwap<HashMap<String, Page>>>, // slug -> Page
+    pub pages_meta: Arc<ArcSwap<Vec<PageMeta>>>,
+    pub doc_id_to_slug: Arc<ArcSwap<HashMap<String, String>>>, // doc_id -> slug
+    pub enscrive: Arc<EnscriveServer>,
+    /// Broadcast channel for live-reload events. Subscribers (browsers
+    /// connected to /_events) receive each message verbatim. None when
+    /// running plain `serve`; populated under `watch`.
+    pub event_tx: Option<broadcast::Sender<&'static str>>,
+    /// Whether the rendered pages should include the SSE reload listener.
+    pub watch_mode: bool,
+    /// Configuration directory used to resolve relative collection paths
+    /// when the watcher needs to re-read source files.
+    pub config_dir: PathBuf,
+    pub cfg: Arc<Config>,
 }
 
-struct EnscriveServer {
-    client: EnscriveClient,
+pub struct EnscriveServer {
+    pub client: EnscriveClient,
     /// collection_name -> collection_id
-    collection_ids: HashMap<String, String>,
+    pub collection_ids: HashMap<String, String>,
     /// voice_name -> voice_id
-    voice_ids: HashMap<String, String>,
-    /// First configured collection's id, used as the default search scope
-    /// when the request does not specify ?collection=name.
-    default_collection_id: Option<String>,
-    /// Per-collection default voice name (lookup by collection name).
-    collection_default_voice: HashMap<String, String>,
-    default_voice_name: Option<String>,
-    default_limit: u32,
+    pub voice_ids: HashMap<String, String>,
+    pub default_collection_id: Option<String>,
+    pub collection_default_voice: HashMap<String, String>,
+    pub default_voice_name: Option<String>,
+    pub default_limit: u32,
 }
 
 pub async fn run(global: GlobalArgs, args: ServeArgs) -> Result<(), String> {
     init_tracing();
+    let state = setup_state(&global, args.base_path.as_deref(), /* watch_mode */ false).await?;
+    serve_with_state(state, &args).await
+}
+
+/// Build the full AppState. Shared between `serve` and `watch`. The
+/// `watch_mode` flag controls whether rendered pages include the SSE
+/// reload listener; it does not affect the routes themselves.
+/// `base_path_override` (when Some) wins over the config file's
+/// `[site] base_path`; pass None to defer to config.
+pub async fn setup_state(
+    global: &GlobalArgs,
+    base_path_override: Option<&str>,
+    watch_mode: bool,
+) -> Result<AppState, String> {
     let config_path = global.resolved_config_path();
     let config_dir = config_path
         .parent()
@@ -128,9 +157,8 @@ pub async fn run(global: GlobalArgs, args: ServeArgs) -> Result<(), String> {
         voice_ids.insert(entry.name.clone(), id);
     }
 
-    let base_path = args
-        .base_path
-        .clone()
+    let base_path = base_path_override
+        .map(str::to_string)
         .or_else(|| cfg.site.base_path.clone())
         .unwrap_or_default();
     let base_path = normalize_base_path(&base_path);
@@ -146,9 +174,10 @@ pub async fn run(global: GlobalArgs, args: ServeArgs) -> Result<(), String> {
     println!("  {} page(s) ready", pages.len());
 
     let default_limit = cfg.search.results_per_page.unwrap_or(10);
+    let cfg_arc = Arc::new(cfg);
     let state = AppState {
-        site_title: cfg.site.title.clone(),
-        site_description: cfg
+        site_title: cfg_arc.site.title.clone(),
+        site_description: cfg_arc
             .site
             .description
             .clone()
@@ -158,30 +187,43 @@ pub async fn run(global: GlobalArgs, args: ServeArgs) -> Result<(), String> {
         theme_css_path,
         theme_variables,
         custom_css,
-        pages: Arc::new(pages),
-        pages_meta: Arc::new(pages_meta),
-        doc_id_to_slug: Arc::new(doc_id_to_slug),
+        pages: Arc::new(ArcSwap::from_pointee(pages)),
+        pages_meta: Arc::new(ArcSwap::from_pointee(pages_meta)),
+        doc_id_to_slug: Arc::new(ArcSwap::from_pointee(doc_id_to_slug)),
         enscrive: Arc::new(EnscriveServer {
             client,
             collection_ids,
             voice_ids,
             default_collection_id,
             collection_default_voice,
-            default_voice_name: cfg
+            default_voice_name: cfg_arc
                 .search
                 .default_voice
                 .clone()
-                .or_else(|| cfg.collections.first().map(|c| c.voice.clone())),
+                .or_else(|| cfg_arc.collections.first().map(|c| c.voice.clone())),
             default_limit,
         }),
+        event_tx: if watch_mode {
+            Some(broadcast::channel::<&'static str>(64).0)
+        } else {
+            None
+        },
+        watch_mode,
+        config_dir: config_dir.clone(),
+        cfg: cfg_arc,
     };
+    Ok(state)
+}
 
-    let app = build_router(state.clone(), &base_path);
-
+/// Bind a TCP listener and serve the router until shutdown. Shared by
+/// `serve` and `watch`.
+pub async fn serve_with_state(state: AppState, args: &ServeArgs) -> Result<(), String> {
     let port = args
         .port
-        .or(cfg.serve.port)
+        .or(state.cfg.serve.port)
         .unwrap_or(DEFAULT_PORT);
+    let base_path = state.base_path.clone();
+    let app = build_router(state.clone(), &base_path);
     let bind_addr: SocketAddr = format!("{}:{}", args.bind, port)
         .parse()
         .map_err(|e| format!("invalid bind: {e}"))?;
@@ -211,6 +253,7 @@ fn build_router(state: AppState, base_path: &str) -> Router {
         .route("/llms.txt", get(handle_llms_txt))
         .route("/sitemap.xml", get(handle_sitemap))
         .route("/search", get(handle_search))
+        .route("/_events", get(handle_events))
         .route("/_assets/*path", get(handle_asset))
         .route("/*slug", get(handle_page))
         .with_state(state)
@@ -230,7 +273,8 @@ async fn handle_healthz() -> &'static str {
 }
 
 async fn handle_index(State(state): State<AppState>) -> Html<String> {
-    let nav = build_nav(&state.pages_meta, &state.base_path, None);
+    let pages_meta = state.pages_meta.load();
+    let nav = build_nav(&pages_meta, &state.base_path, None);
     let ctx = IndexContext {
         site_title: state.site_title.clone(),
         site_description: state.site_description.clone(),
@@ -240,6 +284,7 @@ async fn handle_index(State(state): State<AppState>) -> Html<String> {
         theme_variables: state.theme_variables.clone(),
         custom_css: state.custom_css.clone(),
         nav,
+        watch_mode: state.watch_mode,
     };
     match render_index(&ctx) {
         Ok(html) => Html(html),
@@ -258,7 +303,8 @@ async fn handle_page(
     Query(q): Query<PageQuery>,
 ) -> Response {
     let slug = slug.trim_end_matches('/').to_string();
-    let page = match state.pages.get(&slug) {
+    let pages = state.pages.load();
+    let page = match pages.get(&slug) {
         Some(p) => p,
         None => return not_found(&slug),
     };
@@ -281,7 +327,8 @@ async fn handle_page(
         }))
         .into_response(),
         _ => {
-            let nav = build_nav(&state.pages_meta, &state.base_path, Some(&slug));
+            let pages_meta = state.pages_meta.load();
+            let nav = build_nav(&pages_meta, &state.base_path, Some(&slug));
             let anchors_html =
                 enscrive_docs_render::templates::render_anchor_list(&page.meta.anchors);
             let ctx = PageContext {
@@ -301,6 +348,7 @@ async fn handle_page(
                 page_html: page.html.clone(),
                 page_anchors_html: anchors_html,
                 nav,
+                watch_mode: state.watch_mode,
             };
             match render_page(&ctx) {
                 Ok(html) => Html(html).into_response(),
@@ -418,17 +466,18 @@ async fn handle_search(
 
     match result {
         Ok(results) => {
+            let pages = state.pages.load();
+            let doc_id_to_slug = state.doc_id_to_slug.load();
             let items = results
                 .results
                 .into_iter()
                 .map(|r| {
-                    let slug = state
-                        .doc_id_to_slug
+                    let slug = doc_id_to_slug
                         .get(&r.document_id)
-                        .or_else(|| state.doc_id_to_slug.get(&r.id))
+                        .or_else(|| doc_id_to_slug.get(&r.id))
                         .cloned()
                         .unwrap_or_else(|| r.document_id.clone());
-                    let page = state.pages.get(&slug);
+                    let page = pages.get(&slug);
                     // Build URL with a Text Fragment (#:~:text=...) so
                     // chromium-based browsers and Safari scroll to and
                     // visually highlight the matching passage. Firefox
@@ -479,7 +528,8 @@ async fn handle_llms_txt(State(state): State<AppState>) -> Response {
         out.push_str("\n\n");
     }
     out.push_str("## Pages\n\n");
-    let nav = build_nav(&state.pages_meta, &state.base_path, None);
+    let pages_meta = state.pages_meta.load();
+    let nav = build_nav(&pages_meta, &state.base_path, None);
     for item in nav {
         out.push_str(&format!("- [{title}]({url})\n", title = item.title, url = item.url));
     }
@@ -492,7 +542,8 @@ async fn handle_llms_txt(State(state): State<AppState>) -> Response {
 }
 
 async fn handle_sitemap(State(state): State<AppState>) -> Response {
-    let nav = build_nav(&state.pages_meta, &state.base_path, None);
+    let pages_meta = state.pages_meta.load();
+    let nav = build_nav(&pages_meta, &state.base_path, None);
     let mut out = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
     );
@@ -506,6 +557,45 @@ async fn handle_sitemap(State(state): State<AppState>) -> Response {
         out,
     )
         .into_response()
+}
+
+/// SSE endpoint used by watch-mode browsers to receive `reload` events.
+/// In plain serve mode (event_tx == None) the connection is held open
+/// with keep-alive comments and never sends a real event — same shape,
+/// no surprises.
+async fn handle_events(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    use futures::StreamExt;
+    let rx = match state.event_tx.as_ref() {
+        Some(tx) => tx.subscribe(),
+        None => {
+            // No broadcaster; use a never-yielding stream so the
+            // connection stays open and clients don't reconnect-storm.
+            let (tx, rx) = broadcast::channel::<&'static str>(1);
+            std::mem::forget(tx);
+            rx
+        }
+    };
+    let stream = BroadcastStream::new(rx).map(
+        |res: std::result::Result<&'static str, tokio_stream::wrappers::errors::BroadcastStreamRecvError>| {
+            let kind = res.unwrap_or("reload");
+            Ok(Event::default().event(kind).data(""))
+        },
+    );
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Rebuild the in-memory page cache from disk and atomically swap it
+/// into the live AppState. Called by the watch subcommand after a
+/// markdown file changes, then followed by a broadcast("reload") so
+/// connected browsers refresh.
+pub fn rebuild_pages(state: &AppState) -> Result<(), String> {
+    let (pages, pages_meta, doc_id_to_slug) = build_pages(&state.config_dir, &state.cfg)?;
+    state.pages.store(Arc::new(pages));
+    state.pages_meta.store(Arc::new(pages_meta));
+    state.doc_id_to_slug.store(Arc::new(doc_id_to_slug));
+    Ok(())
 }
 
 async fn handle_asset(AxPath(path): AxPath<String>) -> Response {

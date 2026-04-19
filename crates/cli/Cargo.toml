@@ -30,3 +30,7 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 mime_guess = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+arc-swap = "1"
+notify = { version = "6", default-features = false, features = ["macos_kqueue"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"

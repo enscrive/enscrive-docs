@@ -175,12 +175,18 @@ impl Config {
     }
 
     /// Resolve the API endpoint, honoring (in order): explicit override,
-    /// config file value, env var, built-in default.
+    /// env var, config-file inline, profile endpoint, built-in default.
     pub fn resolved_endpoint(&self, override_value: Option<&str>) -> String {
         override_value
             .map(str::to_string)
             .or_else(|| std::env::var("ENSCRIVE_BASE_URL").ok())
             .or_else(|| self.enscrive.endpoint.clone())
+            .or_else(|| {
+                self.enscrive
+                    .profile
+                    .as_deref()
+                    .and_then(|p| read_profile_field(p, "endpoint").ok().flatten())
+            })
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
     }
 
@@ -223,6 +229,13 @@ impl Config {
 /// look for an `api_key` field. Returns Ok(None) when the file or profile
 /// is missing — that is not an error here.
 fn read_profile_api_key(profile_name: &str) -> Result<Option<String>> {
+    read_profile_field(profile_name, "api_key")
+}
+
+/// Generic helper: pull a string field out of a profile entry in
+/// ~/.config/enscrive/profiles.toml. Returns Ok(None) when the file,
+/// profile, or field is missing or empty.
+fn read_profile_field(profile_name: &str, field: &str) -> Result<Option<String>> {
     let path = match profiles_path() {
         Some(p) => p,
         None => return Ok(None),
@@ -233,14 +246,14 @@ fn read_profile_api_key(profile_name: &str) -> Result<Option<String>> {
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| EnscriveError::Config(format!("read {}: {e}", path.display())))?;
     let value: toml::Value = toml::from_str(&raw)?;
-    let key = value
+    let v = value
         .get("profiles")
         .and_then(|p| p.get(profile_name))
-        .and_then(|p| p.get("api_key"))
+        .and_then(|p| p.get(field))
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .filter(|v| !v.is_empty());
-    Ok(key)
+    Ok(v)
 }
 
 fn profiles_path() -> Option<PathBuf> {

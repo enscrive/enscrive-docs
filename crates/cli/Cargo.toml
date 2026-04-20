@@ -15,8 +15,8 @@ name = "enscrive-docs"
 path = "src/main.rs"
 
 [dependencies]
-enscrive-docs-core = { path = "../core", version = "0.0.1" }
-enscrive-docs-render = { path = "../render", version = "0.0.1" }
+enscrive-docs-core = { path = "../core", version = "0.0.2" }
+enscrive-docs-render = { path = "../render", version = "0.0.2" }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 serde = { workspace = true }

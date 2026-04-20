@@ -110,17 +110,22 @@ variant = "{theme_variant}"        # "neutral" (default) or "enscrive"
 # template_dir = "./templates"
 
 # Each [[collections]] entry maps a directory of markdown files to an
-# Enscrive collection (created in advance via the Enscrive UI or CLI).
+# Enscrive collection. `enscrive-docs bootstrap` creates the collection if
+# it does not already exist (skip-if-exists); once it exists, the
+# embedding_model / dimensions / description fields are ignored.
 [[collections]]
 name = "guides"
 voice = "guides-voice"
 path = "./docs"
 glob = "**/*.md"
+embedding_model = "openai/text-embedding-3-small"
+# dimensions = 1024              # optional MRL truncation
+# description = "Application documentation"
 # url_prefix = "/guides"
 
-# Each [[voices]] entry must already exist in your Enscrive tenant.
-# enscrive-docs verifies them on `ingest`. Future versions will optionally
-# create missing voices from this config.
+# Each [[voices]] entry is either looked up by name or created by
+# `enscrive-docs bootstrap` if missing. Tune voices iteratively with
+# `enscrive-docs voice tune <name>` once you see real search behavior.
 #
 # A note on score_threshold: the default of 0.0 surfaces all matches with
 # their natural relevance scores. Raise it (0.2-0.5) once you have enough

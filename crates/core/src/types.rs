@@ -71,6 +71,39 @@ pub struct CreateVoiceApiRequest {
     pub config: VoiceConfigApi,
 }
 
+/// Body for `PUT /v1/voices/{id}` (full-replace semantics).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct UpdateVoiceApiRequest {
+    pub config: VoiceConfigApi,
+}
+
+/// Response from `DELETE /v1/voices/{id}`.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DeleteVoiceResponse {
+    pub deleted: bool,
+    pub voice_id: String,
+}
+
+// -- Create / Delete collection --
+
+/// Body for `POST /v1/collections`.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CreateCollectionRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub embedding_model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<u32>,
+}
+
+/// Response from `DELETE /v1/collections/{id}`.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DeleteCollectionResponse {
+    pub deleted: bool,
+    pub collection_id: String,
+}
+
 // -- Ingest --
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

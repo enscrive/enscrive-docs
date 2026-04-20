@@ -16,7 +16,8 @@ pub use config::{
 };
 pub use error::{EnscriveError, Result};
 pub use types::{
-    CollectionDetail, CreateVoiceApiRequest, IngestDocument, IngestProgressEvent, IngestRequest,
-    SearchFilter, SearchQuery, SearchResultItem, SearchResults, SearchWithVoiceBody,
+    CollectionDetail, CreateCollectionRequest, CreateVoiceApiRequest, DeleteCollectionResponse,
+    DeleteVoiceResponse, IngestDocument, IngestProgressEvent, IngestRequest, SearchFilter,
+    SearchQuery, SearchResultItem, SearchResults, SearchWithVoiceBody, UpdateVoiceApiRequest,
     VoiceConfigApi, VoiceDetail,
 };

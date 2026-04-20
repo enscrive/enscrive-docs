@@ -5,8 +5,9 @@
 
 use crate::error::{EnscriveError, Result};
 use crate::types::{
-    CollectionDetail, CreateVoiceApiRequest, IngestProgressEvent, IngestRequest, SearchQuery,
-    SearchResults, SearchWithVoiceBody, VoiceDetail,
+    CollectionDetail, CreateCollectionRequest, CreateVoiceApiRequest, DeleteCollectionResponse,
+    DeleteVoiceResponse, IngestProgressEvent, IngestRequest, SearchQuery, SearchResults,
+    SearchWithVoiceBody, UpdateVoiceApiRequest, VoiceDetail,
 };
 use futures_util::StreamExt;
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
@@ -110,6 +111,23 @@ impl EnscriveClient {
         .await
     }
 
+    pub async fn create_collection(
+        &self,
+        request: &CreateCollectionRequest,
+    ) -> Result<CollectionDetail> {
+        self.send_typed::<CollectionDetail>(Method::POST, "/v1/collections", Some(request))
+            .await
+    }
+
+    pub async fn delete_collection(&self, id: &str) -> Result<DeleteCollectionResponse> {
+        self.send_typed::<DeleteCollectionResponse>(
+            Method::DELETE,
+            &format!("/v1/collections/{id}"),
+            NONE,
+        )
+        .await
+    }
+
     // -- Voices --
 
     pub async fn list_voices(&self) -> Result<Vec<VoiceDetail>> {
@@ -125,6 +143,29 @@ impl EnscriveClient {
     pub async fn create_voice(&self, request: &CreateVoiceApiRequest) -> Result<VoiceDetail> {
         self.send_typed::<VoiceDetail>(Method::POST, "/v1/voices", Some(request))
             .await
+    }
+
+    /// PUT /v1/voices/{id} — full-replace update of the voice config.
+    pub async fn update_voice(
+        &self,
+        id: &str,
+        request: &UpdateVoiceApiRequest,
+    ) -> Result<VoiceDetail> {
+        self.send_typed::<VoiceDetail>(
+            Method::PUT,
+            &format!("/v1/voices/{id}"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn delete_voice(&self, id: &str) -> Result<DeleteVoiceResponse> {
+        self.send_typed::<DeleteVoiceResponse>(
+            Method::DELETE,
+            &format!("/v1/voices/{id}"),
+            NONE,
+        )
+        .await
     }
 
     // -- Ingest --

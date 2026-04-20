@@ -26,43 +26,38 @@ Alternatives — `curl https://docs.enscrive.io/install | sh`, `brew install
 enscrive/tap/enscrive-docs`, or download a pre-built binary from
 [github.com/enscrive/enscrive-docs/releases](https://github.com/enscrive/enscrive-docs/releases).
 
-## 2. Create a collection and a voice
-
-In your Enscrive tenant, create one collection that will hold the docs and one voice that
-controls how docs are chunked and ranked:
-
-```bash
-enscrive collections create \
-  --name my-app-docs \
-  --embedding-model text-embedding-3-small
-
-enscrive voices create \
-  --name my-app-voice \
-  --config-json '{"chunking_strategy":"baseline","score_threshold":0.0,"default_limit":10}'
-```
-
-A `score_threshold` of `0.0` surfaces all matches. You can raise it later once the
-collection has enough content to filter against. See [Voices](/voices) for the full
-configuration surface.
-
-## 3. Scaffold and ingest
+## 2. Scaffold
 
 ```bash
 cd my-app
 enscrive-docs init
 ```
 
-This writes an `enscrive-docs.toml` next to your project. Edit the `[[collections]]` and
-`[[voices]]` blocks so the names match what you just created in step 2 and the `path`
-points at your markdown directory. Then:
+This writes an `enscrive-docs.toml` next to your project. Open it and:
+
+- set the `path` on `[[collections]]` to your markdown directory
+- set `embedding_model` on `[[collections]]` (e.g. `"openai/text-embedding-3-small"`) so
+  `bootstrap` can create the collection if it doesn't already exist
+- leave the default `[[voices]]` block as-is for now — you can tune it later via
+  `enscrive-docs voice tune`
+
+A `score_threshold` of `0.0` surfaces all matches. You can raise it later once the
+collection has enough content to filter against. See [Voices](/voices) for the full
+configuration surface.
+
+## 3. Bootstrap
 
 ```bash
-enscrive-docs ingest
+enscrive-docs bootstrap
 ```
 
-The CLI walks your markdown, fingerprints each file, and pushes the documents into the
-collection. Re-runs are idempotent — Enscrive deduplicates by content fingerprint so
-unchanged files are skipped.
+One command creates the voice, creates the collection, and runs the first ingest. It's
+idempotent — re-running against an existing tenant skips any voice or collection that
+already exists and just re-ingests. Pass `--skip-ingest` if you only want to provision
+the voice + collection without pushing content yet.
+
+Enscrive deduplicates by content fingerprint, so `enscrive-docs ingest` on unchanged
+files is effectively free.
 
 ## 4. Serve
 
@@ -72,6 +67,18 @@ enscrive-docs serve
 
 The site is now live at <http://localhost:3737/>. Press `⌘K` (or `Ctrl+K`) and search.
 Click any result and the browser scrolls to and highlights the matching passage.
+
+## Iterating
+
+As your docs evolve:
+
+- `enscrive-docs ingest` pushes new or changed files; unchanged files skip.
+- `enscrive-docs voice tune <voice>` opens the voice config in `$EDITOR`, validates
+  your edits, and `PUT`s the new version. Use this to dial in `score_threshold`,
+  chunking parameters, or the template prompt once you see real search behavior.
+- `enscrive-docs reset --yes` deletes and recreates the collection (then re-runs
+  `bootstrap`). Reach for it only when the corpus has drifted enough that the cleanest
+  rebuild beats incremental fixes.
 
 ## What's next
 

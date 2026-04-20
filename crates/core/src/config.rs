@@ -114,6 +114,18 @@ pub struct CollectionConfig {
     pub glob: String,
     #[serde(default)]
     pub url_prefix: Option<String>,
+    /// Embedding model for `bootstrap` when the collection does not yet exist.
+    /// Ignored when the collection is already present in Enscrive.
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    /// MRL truncation dimension. Optional; defaults to the model's full output.
+    /// Ignored when the collection already exists.
+    #[serde(default)]
+    pub dimensions: Option<u32>,
+    /// Human-readable description attached to the collection at create time.
+    /// Ignored when the collection already exists.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 fn default_glob() -> String {

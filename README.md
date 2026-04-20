@@ -34,12 +34,22 @@ brew install enscrive/tap/enscrive-docs
 # https://github.com/enscrive/enscrive-docs/releases
 ```
 
-## Quickstart (planned)
+## Quickstart
 
 ```bash
 enscrive-docs init                    # scaffold enscrive-docs.toml
-enscrive-docs ingest                  # push your markdown to Enscrive
+enscrive-docs bootstrap               # create voice + collection + first ingest
 enscrive-docs serve --port 8080       # serve HTML + /search JSON + /llms.txt
+```
+
+Additional verbs:
+
+```bash
+enscrive-docs ingest                  # re-ingest (idempotent; unchanged files skip)
+enscrive-docs search "query"          # one-shot neural search from the CLI
+enscrive-docs voice tune <voice>      # edit voice config in $EDITOR, PUT back
+enscrive-docs reset --yes             # delete + rebuild the collection
+enscrive-docs watch                   # serve + reload browser on markdown save
 ```
 
 ## Repository layout

@@ -1,6 +1,9 @@
+pub mod bootstrap;
 pub mod config;
 pub mod ingest;
 pub mod init;
+pub mod reset;
 pub mod search;
 pub mod serve;
+pub mod voice;
 pub mod watch;

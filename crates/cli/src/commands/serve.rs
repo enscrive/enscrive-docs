@@ -13,11 +13,12 @@ use axum::{
 };
 use clap::Args;
 use enscrive_docs_core::{
-    Config, EnscriveClient, SearchFilter, SearchQuery as ApiSearchQuery, SearchWithVoiceBody,
+    CollectionDetail, Config, EnscriveClient, SearchFilter, SearchQuery as ApiSearchQuery,
+    SearchWithVoiceBody, VoiceDetail,
 };
 use enscrive_docs_render::{
     embedded_asset, render_index, render_markdown, render_page, templates::build_nav, IndexContext,
-    Page, PageContext, PageMeta, ThemeVariant,
+    Page, PageContext, PageMeta, ReturnLink, ThemeVariant,
 };
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,7 @@ pub struct AppState {
     pub theme_css_path: String,
     pub theme_variables: String,
     pub custom_css: String,
+    pub return_link: Option<ReturnLink>,
     pub pages: Arc<ArcSwap<HashMap<String, Page>>>, // slug -> Page
     pub pages_meta: Arc<ArcSwap<Vec<PageMeta>>>,
     pub doc_id_to_slug: Arc<ArcSwap<HashMap<String, String>>>, // doc_id -> slug
@@ -118,24 +120,44 @@ pub async fn setup_state(
     let provider_key = cfg.resolved_provider_key(global.embedding_provider_key.as_deref());
     let client = EnscriveClient::with_provider_key(endpoint.clone(), api_key, provider_key);
 
+    // Non-fatal upstream fetch: if the Enscrive endpoint is unreachable at
+    // startup we still come up — pages render from local markdown and search
+    // fails at request-time instead of crash-looping the whole process. That
+    // keeps `serve` resilient to transient upstream outages (deploys, restarts)
+    // without needing systemd retry tuning.
     println!("loading collections + voices from {endpoint} ...");
-    let collections = client.list_collections().await.map_err(|e| e.to_string())?;
-    let voices = client.list_voices().await.map_err(|e| e.to_string())?;
+    let (collections, voices, upstream_reachable) = match try_load_tenant(&client).await {
+        Ok((c, v)) => (c, v, true),
+        Err(e) => {
+            eprintln!(
+                "warning: upstream {endpoint} unreachable at startup ({e}). \
+                 Starting in docs-only mode; search will be unavailable until \
+                 enscrive-docs is restarted with the upstream reachable."
+            );
+            (Vec::new(), Vec::new(), false)
+        }
+    };
 
     let mut collection_ids = HashMap::new();
     let mut collection_default_voice = HashMap::new();
     let mut default_collection_id: Option<String> = None;
     for entry in &cfg.collections {
-        let id = collections
+        let Some(id) = collections
             .iter()
             .find(|c| c.name == entry.name)
             .map(|c| c.id.clone())
-            .ok_or_else(|| {
-                format!(
+        else {
+            // Missing-entity is only a hard config error when we actually
+            // reached the upstream. In docs-only fallback we skip silently —
+            // the startup warning already named the condition.
+            if upstream_reachable {
+                return Err(format!(
                     "Enscrive collection \"{}\" not found in tenant; create it first",
                     entry.name
-                )
-            })?;
+                ));
+            }
+            continue;
+        };
         if default_collection_id.is_none() {
             default_collection_id = Some(id.clone());
         }
@@ -144,16 +166,19 @@ pub async fn setup_state(
     }
     let mut voice_ids = HashMap::new();
     for entry in &cfg.voices {
-        let id = voices
+        let Some(id) = voices
             .iter()
             .find(|v| v.name == entry.name)
             .map(|v| v.id.clone())
-            .ok_or_else(|| {
-                format!(
+        else {
+            if upstream_reachable {
+                return Err(format!(
                     "Enscrive voice \"{}\" not found in tenant; create it first",
                     entry.name
-                )
-            })?;
+                ));
+            }
+            continue;
+        };
         voice_ids.insert(entry.name.clone(), id);
     }
 
@@ -174,6 +199,10 @@ pub async fn setup_state(
     println!("  {} page(s) ready", pages.len());
 
     let default_limit = cfg.search.results_per_page.unwrap_or(10);
+    let return_link = cfg.return_to.as_ref().map(|r| ReturnLink {
+        url: r.url.clone(),
+        label: r.label.clone(),
+    });
     let cfg_arc = Arc::new(cfg);
     let state = AppState {
         site_title: cfg_arc.site.title.clone(),
@@ -187,6 +216,7 @@ pub async fn setup_state(
         theme_css_path,
         theme_variables,
         custom_css,
+        return_link,
         pages: Arc::new(ArcSwap::from_pointee(pages)),
         pages_meta: Arc::new(ArcSwap::from_pointee(pages_meta)),
         doc_id_to_slug: Arc::new(ArcSwap::from_pointee(doc_id_to_slug)),
@@ -213,6 +243,18 @@ pub async fn setup_state(
         cfg: cfg_arc,
     };
     Ok(state)
+}
+
+/// Fetch collections + voices from the Enscrive upstream. Both calls are
+/// required together — either failing short-circuits into the caller's
+/// non-fatal fallback, so the serve process never exits on a transient
+/// upstream outage.
+async fn try_load_tenant(
+    client: &EnscriveClient,
+) -> Result<(Vec<CollectionDetail>, Vec<VoiceDetail>), String> {
+    let collections = client.list_collections().await.map_err(|e| e.to_string())?;
+    let voices = client.list_voices().await.map_err(|e| e.to_string())?;
+    Ok((collections, voices))
 }
 
 /// Bind a TCP listener and serve the router until shutdown. Shared by
@@ -284,6 +326,7 @@ async fn handle_index(State(state): State<AppState>) -> Html<String> {
         theme_variables: state.theme_variables.clone(),
         custom_css: state.custom_css.clone(),
         nav,
+        return_link: state.return_link.clone(),
         watch_mode: state.watch_mode,
     };
     match render_index(&ctx) {
@@ -348,6 +391,7 @@ async fn handle_page(
                 page_html: page.html.clone(),
                 page_anchors_html: anchors_html,
                 nav,
+                return_link: state.return_link.clone(),
                 watch_mode: state.watch_mode,
             };
             match render_page(&ctx) {

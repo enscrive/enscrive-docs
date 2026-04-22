@@ -15,5 +15,6 @@ pub use markdown::{render_markdown, HeadingAnchor, RenderedMarkdown};
 pub use page::{Page, PageMeta};
 pub use templates::{
     build_nav, render_anchor_list, render_index, render_page, IndexContext, NavItem, PageContext,
+    ReturnLink,
 };
 pub use theme::{Theme, ThemeVariant};

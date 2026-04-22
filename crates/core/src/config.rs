@@ -32,6 +32,26 @@ pub struct Config {
     pub search: SearchConfig,
     #[serde(default)]
     pub serve: ServeConfig,
+    /// Optional "Return to {app}" link shown in the header. Present only when
+    /// the embedding application declares a home URL to bounce users back to.
+    #[serde(default, rename = "return_to")]
+    pub return_to: Option<ReturnConfig>,
+}
+
+/// Header link that takes the reader out of the docs site and back to the
+/// calling application. Config-driven (not query-param) to sidestep the
+/// open-redirect risk of accepting a URL from the caller.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ReturnConfig {
+    /// Absolute URL to return to (e.g. "https://app.example.com").
+    pub url: String,
+    /// Anchor text. If omitted, the rendered link reads "Return".
+    #[serde(default = "default_return_label")]
+    pub label: String,
+}
+
+fn default_return_label() -> String {
+    "Return".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -307,6 +327,35 @@ mod tests {
         assert_eq!(cfg.collections[0].glob, "**/*.md");
         assert_eq!(cfg.voices[0].chunking_strategy, "paragraphs");
         assert_eq!(cfg.theme.variant, "neutral");
+    }
+
+    #[test]
+    fn parses_return_to_block() {
+        let raw = r#"
+            [site]
+            title = "T"
+
+            [return_to]
+            url = "https://app.example.com"
+            label = "Back to MyApp"
+        "#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        let r = cfg.return_to.expect("return_to present");
+        assert_eq!(r.url, "https://app.example.com");
+        assert_eq!(r.label, "Back to MyApp");
+    }
+
+    #[test]
+    fn return_to_label_defaults_when_omitted() {
+        let raw = r#"
+            [site]
+            title = "T"
+
+            [return_to]
+            url = "https://app.example.com"
+        "#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.return_to.unwrap().label, "Return");
     }
 
     #[test]

@@ -157,6 +157,32 @@ a:hover { text-decoration: underline; }
   color: #fff;
 }
 
+/* Header actions cluster: search trigger + optional return link */
+.ed-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* "Return to {app}" link shown when [return_to] is configured */
+.ed-return-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9rem;
+  color: var(--fg-muted);
+  text-decoration: none;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.ed-return-link:hover {
+  color: var(--fg);
+  border-color: var(--border);
+  text-decoration: none;
+}
+
 /* Layout shell */
 .ed-shell {
   max-width: 1200px;

@@ -13,6 +13,14 @@ pub struct NavItem {
     pub current: bool,
 }
 
+/// Header link back to the embedding application. Populated from the
+/// `[return_to]` block in enscrive-docs.toml.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReturnLink {
+    pub url: String,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PageContext {
     pub site_title: String,
@@ -27,6 +35,7 @@ pub struct PageContext {
     pub page_html: String,
     pub page_anchors_html: String,
     pub nav: Vec<NavItem>,
+    pub return_link: Option<ReturnLink>,
     /// Inject the dev-mode SSE reload listener. Only set true under
     /// `enscrive-docs watch`; production `serve` leaves this false.
     pub watch_mode: bool,
@@ -42,6 +51,7 @@ pub struct IndexContext {
     pub theme_variables: String,
     pub custom_css: String,
     pub nav: Vec<NavItem>,
+    pub return_link: Option<ReturnLink>,
     pub watch_mode: bool,
 }
 
@@ -101,4 +111,42 @@ pub fn render_anchor_list(anchors: &[crate::markdown::HeadingAnchor]) -> String 
     }
     out.push_str("</ul>");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_index_ctx(return_link: Option<ReturnLink>) -> IndexContext {
+        IndexContext {
+            site_title: "Docs".into(),
+            site_description: "Description".into(),
+            base_path: "".into(),
+            asset_base: "/_assets".into(),
+            theme_css_path: "themes/neutral/style.css".into(),
+            theme_variables: String::new(),
+            custom_css: String::new(),
+            nav: vec![],
+            return_link,
+            watch_mode: false,
+        }
+    }
+
+    #[test]
+    fn index_renders_return_link_when_present() {
+        let ctx = base_index_ctx(Some(ReturnLink {
+            url: "https://app.example.com".into(),
+            label: "Back to MyApp".into(),
+        }));
+        let html = render_index(&ctx).expect("render");
+        assert!(html.contains("ed-return-link"), "link class missing: {html}");
+        assert!(html.contains("https://app.example.com"), "href missing: {html}");
+        assert!(html.contains("Back to MyApp"), "label missing: {html}");
+    }
+
+    #[test]
+    fn index_omits_return_link_when_absent() {
+        let html = render_index(&base_index_ctx(None)).expect("render");
+        assert!(!html.contains("ed-return-link"), "link unexpectedly rendered");
+    }
 }

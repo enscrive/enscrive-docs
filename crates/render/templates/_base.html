@@ -30,10 +30,18 @@
   <header class="ed-header">
     <div class="ed-header-inner">
       <a class="ed-brand" href="{{ ctx.base_path }}/">{{ ctx.site_title }}</a>
-      <button class="ed-search-trigger" data-search-trigger aria-label="Search documentation">
-        <span>Search</span>
-        <kbd>⌘K</kbd>
-      </button>
+      <div class="ed-header-actions">
+        <button class="ed-search-trigger" data-search-trigger aria-label="Search documentation">
+          <span>Search</span>
+          <kbd>⌘K</kbd>
+        </button>
+        {% if let Some(rl) = ctx.return_link.as_ref() %}
+        <a class="ed-return-link" href="{{ rl.url }}" aria-label="{{ rl.label }}">
+          <span aria-hidden="true">←</span>
+          <span>{{ rl.label }}</span>
+        </a>
+        {% endif %}
+      </div>
     </div>
   </header>
   <div class="ed-shell">

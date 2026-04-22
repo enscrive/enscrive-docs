@@ -120,6 +120,21 @@ Server-side options for `enscrive-docs serve` and `watch`.
 port = 3737                        # CLI --port and $PORT env override this
 ```
 
+## `[return_to]`
+
+Optional header link that takes the reader back to the application embedding
+these docs. Present only when declared — omit the block and no link renders.
+
+```toml
+[return_to]
+url = "https://app.example.com"
+label = "MyApp Dashboard"          # optional; defaults to "Return"
+```
+
+The link is config-driven rather than query-param-driven on purpose: accepting
+a return URL from the caller would be an open-redirect vector. Each deployment
+declares its own home in its own `enscrive-docs.toml`.
+
 ## `[[versions]]` (deferred)
 
 Multi-version docs. Each version maps to a separate collection.

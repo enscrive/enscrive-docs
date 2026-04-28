@@ -1,0 +1,234 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ROLE_ARN: arn:aws:iam::535002853127:role/enscrive-releases-publisher
+  S3_BUCKET: enscrive-install-artifacts-dev
+  CF_DISTRIBUTION_ID: EWE9BH1POOS0A
+  CHANNEL: dev
+  BINARY_NAME: enscrive-docs
+
+# NOTE(ENS-82 follow-on): cosign keyless signing is intentionally omitted from
+# this initial enscrive-docs release pipeline. The enscrive-cli release.yml
+# carries the canonical `sign:` job; once ENS-82 lands, mirror that block here
+# to bring enscrive-docs to parity with the rest of the Enscrive service
+# binaries (cli, developer, observe, embed).
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The two glibc-linked targets MUST build on ubuntu-22.04 (glibc 2.35).
+          # ubuntu-latest currently resolves to ubuntu-24.04 whose glibc 2.39
+          # produces binaries that fail on Ubuntu 22.04 LTS — the most common
+          # Linux LTS server distribution. Pin to 22.04 so the binary runs on
+          # Ubuntu 22.04+, Debian 12+, Fedora 36+, CentOS Stream 9+, and any
+          # newer glibc system. Musl is glibc-independent so its build host
+          # can stay on ubuntu-latest.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            cross: true
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          # x86_64-apple-darwin dropped 2026-04-26: GitHub macos-13 runner
+          # capacity is permanently starved (Apple/GH deprecating Intel Mac
+          # builds). Apple Silicon users are served by aarch64-apple-darwin;
+          # remaining Intel Mac users build from source or run aarch64 under
+          # Rosetta. Enscrive Deploy Modernization tracks this in DEPLOY-012.
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.os }}-cargo-${{ matrix.target }}-
+
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install cross
+        if: matrix.cross == true
+        run: cargo install cross --locked
+
+      - name: Build (native)
+        if: matrix.cross == false
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin ${{ env.BINARY_NAME }}
+
+      - name: Build (cross)
+        if: matrix.cross == true
+        run: cross build --release --locked --target ${{ matrix.target }} --bin ${{ env.BINARY_NAME }}
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          SRC="target/${{ matrix.target }}/release/${BINARY_NAME}"
+          DST="dist/${BINARY_NAME}-${{ matrix.target }}"
+          cp "$SRC" "$DST"
+          chmod +x "$DST"
+          ls -lh "$DST"
+
+      - name: Compute SHA256 (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum "${BINARY_NAME}-${{ matrix.target }}" > "${BINARY_NAME}-${{ matrix.target }}.sha256"
+          cat "${BINARY_NAME}-${{ matrix.target }}.sha256"
+
+      - name: Compute SHA256 (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 "${BINARY_NAME}-${{ matrix.target }}" > "${BINARY_NAME}-${{ matrix.target }}.sha256"
+          cat "${BINARY_NAME}-${{ matrix.target }}.sha256"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload binary to S3
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          TARGET="${{ matrix.target }}"
+          aws s3 cp \
+            "dist/${BINARY_NAME}-${TARGET}" \
+            "s3://${S3_BUCKET}/releases/${CHANNEL}/${TAG}/${TARGET}/${BINARY_NAME}" \
+            --cache-control "public, max-age=31536000, immutable"
+          aws s3 cp \
+            "dist/${BINARY_NAME}-${TARGET}.sha256" \
+            "s3://${S3_BUCKET}/releases/${CHANNEL}/${TAG}/${TARGET}/${BINARY_NAME}.sha256" \
+            --cache-control "public, max-age=31536000, immutable"
+
+      - name: Upload artifact for aggregation
+        uses: actions/upload-artifact@v4
+        with:
+          name: enscrive-docs-${{ matrix.target }}
+          path: |
+            dist/${{ env.BINARY_NAME }}-${{ matrix.target }}
+            dist/${{ env.BINARY_NAME }}-${{ matrix.target }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  aggregate:
+    name: aggregate + release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts and produce SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -type f -name "${BINARY_NAME}-*" ! -name "*.sha256" -exec cp {} dist/ \;
+          ls -lh dist/
+          cd dist
+          : > SHA256SUMS
+          for f in ${BINARY_NAME}-*; do
+            [[ "$f" == *.sha256 ]] && continue
+            [[ "$f" == "SHA256SUMS" ]] && continue
+            sha256sum "$f" >> SHA256SUMS
+          done
+          cat SHA256SUMS
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload SHA256SUMS to S3
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          aws s3 cp \
+            dist/SHA256SUMS \
+            "s3://${S3_BUCKET}/releases/${CHANNEL}/${TAG}/SHA256SUMS" \
+            --cache-control "public, max-age=31536000, immutable"
+
+      - name: Invalidate CloudFront
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          aws cloudfront create-invalidation \
+            --distribution-id "${CF_DISTRIBUTION_ID}" \
+            --paths "/releases/${CHANNEL}/${TAG}/*"
+
+      - name: Determine prerelease flag
+        id: prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" == *-alpha* || "$TAG" == *-beta* || "$TAG" == *-rc* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          prerelease: ${{ steps.prerelease.outputs.prerelease }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ## Verification
+
+            Checksums: `curl -fsSL https://dev.enscrive.io/releases/dev/${{ github.ref_name }}/SHA256SUMS | sha256sum -c --ignore-missing`
+          files: |
+            dist/enscrive-docs-*
+            dist/SHA256SUMS

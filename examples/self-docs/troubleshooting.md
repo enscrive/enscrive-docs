@@ -18,24 +18,24 @@ order:
 3. If you set `[enscrive] api_key = "..."` directly in `enscrive-docs.toml`, is the file
    actually being read? Run `enscrive-docs config` to see the resolved configuration.
 
-## "Enscrive collection \"foo\" not found in tenant"
+## "Enscrive corpus \"foo\" not found in tenant"
 
-`enscrive-docs ingest` and `serve` verify on startup that every configured collection
-exists. The message means your `enscrive-docs.toml` references a collection name that is
+`enscrive-docs ingest` and `serve` verify on startup that every configured corpus
+exists. The message means your `enscrive-docs.toml` references a corpus name that is
 not in the tenant the API key authenticates against.
 
-Either rename the entry in `[[collections]]` to match an existing collection, or create
+Either rename the entry in `[[corpora]]` to match an existing corpus, or create
 it first:
 
 ```bash
-enscrive collections create --name foo --embedding-model text-embedding-3-small
+enscrive corpus create --name foo --embedding-model text-embedding-3-small
 ```
 
 Same applies to voices.
 
 ## Search returns zero results for everything
 
-The most common cause is a `score_threshold` set higher than your collection's actual
+The most common cause is a `score_threshold` set higher than your corpus's actual
 score range. Documents shorter than a few paragraphs and queries shorter than a phrase
 genuinely produce semantic scores in the 0.1–0.4 range. A threshold of `0.5` will
 filter all of them out.
@@ -49,17 +49,17 @@ EOF
 ```
 
 Then re-run a search. If you now see results with low scores, that's the actual
-relevance — your collection might just be small. Add more docs.
+relevance — your corpus might just be small. Add more docs.
 
 ## Search fails with `upstream_search_failed` (HTTP 502)
 
 The `/search` endpoint forwards Enscrive errors verbatim in `data.detail`. The two
 common causes:
 
-- **Collection not specified, multi-collection tenant**: the upstream search RPC errors
-  out when no collection filter is sent against a tenant with many collections. The
-  serve handler defaults to the first configured collection — if you see this, your
-  config has zero `[[collections]]` entries.
+- **Corpus not specified, multi-corpus tenant**: the upstream search RPC errors
+  out when no corpus filter is sent against a tenant with many corpora. The
+  serve handler defaults to the first configured corpus — if you see this, your
+  config has zero `[[corpora]]` entries.
 - **Voice not in tenant**: the voice id the request resolved to is not present. Run
   `enscrive voices list` and confirm.
 
@@ -70,7 +70,7 @@ common causes:
 2. Open DevTools → Network → `_events`. You should see a long-polling `text/event-stream`
    connection with no body. If it is missing, the page was rendered by `serve` (no
    listener injected).
-3. Edit a `.md` file inside a configured collection `path`. Files outside the configured
+3. Edit a `.md` file inside a configured corpus `path`. Files outside the configured
    paths are not watched.
 4. Editor temp files (`.foo.swp`, `#foo#`, `~`, JetBrains `___jb_*`) are filtered out
    on purpose. The actual `.md` save event is what triggers the reload.

@@ -21,9 +21,9 @@ enscrive-docs serve --base-path /docs
 On startup the binary:
 
 1. Loads `enscrive-docs.toml` and resolves the API key + endpoint.
-2. Lists collections and voices from your Enscrive tenant and verifies that every
-   `[[collections]]` and `[[voices]]` entry resolves to a real ID.
-3. Walks each collection's `path` for matching markdown files and renders them into an
+2. Lists corpora and voices from your Enscrive tenant and verifies that every
+   `[[corpora]]` and `[[voices]]` entry resolves to a real ID.
+3. Walks each corpus's `path` for matching markdown files and renders them into an
    in-memory cache.
 4. Binds the listener and serves.
 
@@ -51,7 +51,7 @@ order, highest to lowest:
 | `GET /{slug}` | Rendered HTML page |
 | `GET /{slug}?format=md` | Raw markdown (handy for agents) |
 | `GET /{slug}?format=json` | `{title, slug, content_html, content_md, anchors[]}` |
-| `GET /search?q=...&voice=...&collection=...&limit=10` | JSON search results |
+| `GET /search?q=...&voice=...&corpus=...&limit=10` | JSON search results |
 | `GET /llms.txt` | LLM-friendly index of all pages |
 | `GET /sitemap.xml` | Standard XML sitemap |
 | `GET /healthz` | Liveness check (`200 ok`) |
@@ -65,7 +65,7 @@ enscrive-docs watch --debounce-ms 250
 ```
 
 Same as `serve` but with a `notify`-based filesystem watcher and an SSE `/_events`
-endpoint. On every markdown change inside a configured collection's `path`:
+endpoint. On every markdown change inside a configured corpus's `path`:
 
 1. The change is debounced (default 250 ms) to coalesce editor save bursts.
 2. The page cache is rebuilt in memory.

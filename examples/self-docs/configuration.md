@@ -61,14 +61,14 @@ custom_css = "./custom.css"
 template_dir = "./templates"
 ```
 
-## `[[collections]]`
+## `[[corpora]]`
 
-Each entry maps a directory of markdown files to an Enscrive collection. The collection
+Each entry maps a directory of markdown files to an Enscrive corpus. The corpus
 must already exist in your tenant — `enscrive-docs ingest` verifies this on startup and
 errors helpfully if it doesn't.
 
 ```toml
-[[collections]]
+[[corpora]]
 name = "guides"
 voice = "guides-voice"
 path = "./docs/guides"
@@ -76,7 +76,7 @@ glob = "**/*.md"
 url_prefix = "/guides"             # /docs/guides/getting-started ...
 ```
 
-You can configure multiple collections — for example, one for tutorials and one for API
+You can configure multiple corpora — for example, one for tutorials and one for API
 reference, each with a different voice tuned for its content type.
 
 ## `[[voices]]`
@@ -108,8 +108,8 @@ results_per_page = 10
 include_snippets = true
 ```
 
-When the user does not specify `?voice=` or `?collection=` in a search request, these
-defaults plus the first configured collection are used as fallbacks.
+When the user does not specify `?voice=` or `?corpus=` in a search request, these
+defaults plus the first configured corpus are used as fallbacks.
 
 ## `[serve]`
 
@@ -137,16 +137,16 @@ declares its own home in its own `enscrive-docs.toml`.
 
 ## `[[versions]]` (deferred)
 
-Multi-version docs. Each version maps to a separate collection.
+Multi-version docs. Each version maps to separate corpora.
 
 ```toml
 [[versions]]
 slug = "v1"
-collections = ["guides-v1", "api-reference-v1"]
+corpora = ["guides-v1", "api-reference-v1"]
 
 [[versions]]
 slug = "v2"
-collections = ["guides", "api-reference"]
+corpora = ["guides", "api-reference"]
 default = true
 ```
 

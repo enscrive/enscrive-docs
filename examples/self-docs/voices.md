@@ -1,6 +1,6 @@
 ---
 title: Voices
-description: Tuning chunking strategies and ranking behavior per collection.
+description: Tuning chunking strategies and ranking behavior per corpus.
 order: 40
 ---
 
@@ -14,18 +14,18 @@ Enscrive tenant on every operation.
 If you take one thing from this page: voices are how you make search good. The CLI
 configuration is mostly plumbing — the voice is the lever.
 
-## The relationship between voices and collections
+## The relationship between voices and corpora
 
-A voice is independent of a collection — multiple collections can share one voice, and
-one collection can be searched with different voices. In `enscrive-docs.toml` you
-associate one voice with each collection (the "default voice for this collection's
+A voice is independent of a corpus — multiple corpora can share one voice, and
+one corpus can be searched with different voices. In `enscrive-docs.toml` you
+associate one voice with each corpus (the "default voice for this corpus's
 content"); the search subcommand and `/search` endpoint pick that voice automatically
 unless you override.
 
 ```toml
-[[collections]]
+[[corpora]]
 name = "guides"
-voice = "guides-voice"             # default voice for searches against this collection
+voice = "guides-voice"             # default voice for searches against this corpus
 path = "./docs/guides"
 
 [[voices]]
@@ -81,10 +81,10 @@ score_threshold = 0.0              # surface all matches with their natural scor
 
 **Start with `0.0`.** Raise the threshold only when:
 
-1. Your collection is large enough that low-relevance noise is a real problem.
+1. Your corpus is large enough that low-relevance noise is a real problem.
 2. You have measured what threshold value corresponds to the floor of "useful" results.
 
-A threshold of `0.5` against a collection of fewer than ~50 documents will routinely
+A threshold of `0.5` against a corpus of fewer than ~50 documents will routinely
 return zero results because semantic scores for short documents and short queries
 genuinely live in the 0.1–0.4 range. The fix is data, not a higher threshold.
 

@@ -28,7 +28,7 @@ in visible DOM. Switching the voice to `paragraphs` chunking usually fixes this.
 ## The HTTP endpoint
 
 ```
-GET /search?q=...&voice=...&collection=...&limit=10
+GET /search?q=...&voice=...&corpus=...&limit=10
 ```
 
 Returns:
@@ -45,7 +45,7 @@ Returns:
       "snippet": "# Trademark Policy The names Enscrive, enscrive-docs, ...",
       "url": "/trademarks#:~:text=Trademark%20Policy%20The%20names%20Enscrive",
       "title": "Trademarks",
-      "collection_id": "..."
+      "corpus_id": "..."
     }
   ]
 }
@@ -65,7 +65,7 @@ queries from the terminal:
 
 ```bash
 enscrive-docs search "trademark"
-enscrive-docs search "agent voice" --collection guides --limit 5
+enscrive-docs search "agent voice" --corpus guides --limit 5
 enscrive-docs search "how to install" --format json | jq
 enscrive-docs search "configuration" --format md > results.md
 ```
@@ -79,18 +79,18 @@ Output formats:
 | `md` | Markdown sections with blockquoted snippets — paste-ready into chat or issues |
 
 The CLI uses the same scope-resolution logic as the HTTP endpoint: defaults to the
-first configured collection, defaults the voice to that collection's configured voice.
+first configured corpus, defaults the voice to that corpus's configured voice.
 
 ## How scoring works
 
 Scores are cosine similarity between the query embedding and each chunk's embedding,
 returned by the Enscrive API. Higher is more similar.
 
-- `0.5+` is a strong match. With a small collection, scores at this level are rare.
+- `0.5+` is a strong match. With a small corpus, scores at this level are rare.
 - `0.2–0.5` is a typical "this document discusses your topic" match.
 - `0.0–0.2` is a weak match — the topic is mentioned but not central.
 
-Do not aggressively raise `score_threshold` until your collection is large enough that
+Do not aggressively raise `score_threshold` until your corpus is large enough that
 the noise floor is meaningful. See [Voices](/voices) for tuning guidance.
 
 ## Voice-tuned vs. plain search

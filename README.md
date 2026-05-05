@@ -4,7 +4,7 @@
 > by Enscrive — for humans, agents, and HTTP consumers.
 
 `enscrive-docs` is a single Rust binary that ingests your markdown into
-[Enscrive](https://enscrive.io) collections, configures voices for tuned
+[Enscrive](https://enscrive.io) corpora, configures voices for tuned
 neural search, and serves the docs as polished HTML, a JSON search API,
 an `/llms.txt` index, and a sitemap — all from one process, with zero
 runtime dependencies beyond the public Enscrive API.
@@ -38,7 +38,7 @@ brew install enscrive/tap/enscrive-docs
 
 ```bash
 enscrive-docs init                    # scaffold enscrive-docs.toml
-enscrive-docs bootstrap               # create voice + collection + first ingest
+enscrive-docs bootstrap               # create voice + corpus + first ingest
 enscrive-docs serve --port 8080       # serve HTML + /search JSON + /llms.txt
 ```
 
@@ -48,7 +48,7 @@ Additional verbs:
 enscrive-docs ingest                  # re-ingest (idempotent; unchanged files skip)
 enscrive-docs search "query"          # one-shot neural search from the CLI
 enscrive-docs voice tune <voice>      # edit voice config in $EDITOR, PUT back
-enscrive-docs reset --yes             # delete + rebuild the collection
+enscrive-docs reset --yes             # delete + rebuild the corpus
 enscrive-docs watch                   # serve + reload browser on markdown save
 ```
 

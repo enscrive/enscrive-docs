@@ -1,8 +1,8 @@
 # Self-docs
 
 This directory holds the canonical documentation for `enscrive-docs` itself, written in
-markdown. It is intended to be ingested into an Enscrive collection and served by
-`enscrive-docs serve` running against that collection — i.e. the tool's own docs are
+markdown. It is intended to be ingested into an Enscrive corpus and served by
+`enscrive-docs serve` running against that corpus — i.e. the tool's own docs are
 served by the tool itself.
 
 The deployment at [docs.enscrive.io](https://docs.enscrive.io) currently runs the
@@ -27,7 +27,7 @@ content.
 
 ## Local preview
 
-To render this collection through the tool, point an `enscrive-docs.toml` at this
+To render this corpus through the tool, point an `enscrive-docs.toml` at this
 directory:
 
 ```toml
@@ -38,7 +38,7 @@ profile = "default"
 title = "enscrive-docs"
 description = "Retrieval-native documentation backed by Enscrive neural search."
 
-[[collections]]
+[[corpora]]
 name = "enscrive-docs-self"
 voice = "docs-default"
 path = "."

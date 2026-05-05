@@ -7,11 +7,11 @@ order: 0
 # enscrive-docs
 
 `enscrive-docs` is a single Rust binary that turns any markdown directory into a polished
-documentation site backed by [Enscrive](https://enscrive.io) collections, voices, and neural
+documentation site backed by [Enscrive](https://enscrive.io) corpora, voices, and neural
 search. It is built for an audience of humans, AI agents, and any HTTP consumer in equal
 measure.
 
-This site is itself served by `enscrive-docs serve` against an Enscrive collection
+This site is itself served by `enscrive-docs serve` against an Enscrive corpus
 containing the markdown you are reading right now. Press `⌘K` (or `Ctrl+K`) and search
 for anything — the results are scored by an embedding model, not a keyword matcher.
 
@@ -20,7 +20,7 @@ for anything — the results are scored by an embedding model, not a keyword mat
 A single binary that:
 
 - Walks a configured directory of markdown files.
-- Pushes each file into an Enscrive collection, chunked according to a configured voice.
+- Pushes each file into an Enscrive corpus, chunked according to a configured voice.
 - Serves the rendered HTML, a JSON `/search` endpoint, an `/llms.txt` index, and a
   `sitemap.xml` from one process with no external runtime dependencies.
 

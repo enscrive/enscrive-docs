@@ -23,10 +23,10 @@ enum Command {
     /// Scaffold an enscrive-docs.toml in the current directory
     Init(commands::init::InitArgs),
 
-    /// Idempotently create voices + collections from config, then first ingest
+    /// Idempotently create voices + corpora from config, then first ingest
     Bootstrap(commands::bootstrap::BootstrapArgs),
 
-    /// Push the configured markdown directories into Enscrive collections
+    /// Push the configured markdown directories into Enscrive corpora
     Ingest(commands::ingest::IngestArgs),
 
     /// Serve the docs as HTML + JSON search + /llms.txt
@@ -35,13 +35,13 @@ enum Command {
     /// Serve + watch markdown files; auto-reload the browser on save
     Watch(commands::watch::WatchArgs),
 
-    /// One-shot neural search against the configured collections
+    /// One-shot neural search against the configured corpora
     Search(commands::search::SearchArgs),
 
     /// Voice administration (tune, …)
     Voice(commands::voice::VoiceArgs),
 
-    /// Delete and recreate configured collections (destructive, --yes required)
+    /// Delete and recreate configured corpora (destructive, --yes required)
     Reset(commands::reset::ResetArgs),
 
     /// Inspect the resolved configuration

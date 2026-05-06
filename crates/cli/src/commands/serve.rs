@@ -13,7 +13,7 @@ use axum::{
 };
 use clap::Args;
 use enscrive_docs_core::{
-    CollectionDetail, Config, EnscriveClient, SearchFilter, SearchQuery as ApiSearchQuery,
+    CorpusDetail, Config, EnscriveClient, SearchFilter, SearchQuery as ApiSearchQuery,
     SearchWithVoiceBody, VoiceDetail,
 };
 use enscrive_docs_render::{
@@ -72,7 +72,7 @@ pub struct AppState {
     pub event_tx: Option<broadcast::Sender<&'static str>>,
     /// Whether the rendered pages should include the SSE reload listener.
     pub watch_mode: bool,
-    /// Configuration directory used to resolve relative collection paths
+    /// Configuration directory used to resolve relative corpus paths
     /// when the watcher needs to re-read source files.
     pub config_dir: PathBuf,
     pub cfg: Arc<Config>,
@@ -80,12 +80,12 @@ pub struct AppState {
 
 pub struct EnscriveServer {
     pub client: EnscriveClient,
-    /// collection_name -> collection_id
-    pub collection_ids: HashMap<String, String>,
+    /// corpus_name -> corpus_id
+    pub corpus_ids: HashMap<String, String>,
     /// voice_name -> voice_id
     pub voice_ids: HashMap<String, String>,
-    pub default_collection_id: Option<String>,
-    pub collection_default_voice: HashMap<String, String>,
+    pub default_corpus_id: Option<String>,
+    pub corpus_default_voice: HashMap<String, String>,
     pub default_voice_name: Option<String>,
     pub default_limit: u32,
 }
@@ -125,8 +125,8 @@ pub async fn setup_state(
     // fails at request-time instead of crash-looping the whole process. That
     // keeps `serve` resilient to transient upstream outages (deploys, restarts)
     // without needing systemd retry tuning.
-    println!("loading collections + voices from {endpoint} ...");
-    let (collections, voices, upstream_reachable) = match try_load_tenant(&client).await {
+    println!("loading corpora + voices from {endpoint} ...");
+    let (corpora, voices, upstream_reachable) = match try_load_tenant(&client).await {
         Ok((c, v)) => (c, v, true),
         Err(e) => {
             eprintln!(
@@ -138,11 +138,11 @@ pub async fn setup_state(
         }
     };
 
-    let mut collection_ids = HashMap::new();
-    let mut collection_default_voice = HashMap::new();
-    let mut default_collection_id: Option<String> = None;
-    for entry in &cfg.collections {
-        let Some(id) = collections
+    let mut corpus_ids = HashMap::new();
+    let mut corpus_default_voice = HashMap::new();
+    let mut default_corpus_id: Option<String> = None;
+    for entry in &cfg.corpora {
+        let Some(id) = corpora
             .iter()
             .find(|c| c.name == entry.name)
             .map(|c| c.id.clone())
@@ -152,17 +152,17 @@ pub async fn setup_state(
             // the startup warning already named the condition.
             if upstream_reachable {
                 return Err(format!(
-                    "Enscrive collection \"{}\" not found in tenant; create it first",
+                    "Enscrive corpus \"{}\" not found in tenant; create it first",
                     entry.name
                 ));
             }
             continue;
         };
-        if default_collection_id.is_none() {
-            default_collection_id = Some(id.clone());
+        if default_corpus_id.is_none() {
+            default_corpus_id = Some(id.clone());
         }
-        collection_default_voice.insert(entry.name.clone(), entry.voice.clone());
-        collection_ids.insert(entry.name.clone(), id);
+        corpus_default_voice.insert(entry.name.clone(), entry.voice.clone());
+        corpus_ids.insert(entry.name.clone(), id);
     }
     let mut voice_ids = HashMap::new();
     for entry in &cfg.voices {
@@ -222,15 +222,15 @@ pub async fn setup_state(
         doc_id_to_slug: Arc::new(ArcSwap::from_pointee(doc_id_to_slug)),
         enscrive: Arc::new(EnscriveServer {
             client,
-            collection_ids,
+            corpus_ids,
             voice_ids,
-            default_collection_id,
-            collection_default_voice,
+            default_corpus_id,
+            corpus_default_voice,
             default_voice_name: cfg_arc
                 .search
                 .default_voice
                 .clone()
-                .or_else(|| cfg_arc.collections.first().map(|c| c.voice.clone())),
+                .or_else(|| cfg_arc.corpora.first().map(|c| c.voice.clone())),
             default_limit,
         }),
         event_tx: if watch_mode {
@@ -245,16 +245,16 @@ pub async fn setup_state(
     Ok(state)
 }
 
-/// Fetch collections + voices from the Enscrive upstream. Both calls are
+/// Fetch corpora + voices from the Enscrive upstream. Both calls are
 /// required together — either failing short-circuits into the caller's
 /// non-fatal fallback, so the serve process never exits on a transient
 /// upstream outage.
 async fn try_load_tenant(
     client: &EnscriveClient,
-) -> Result<(Vec<CollectionDetail>, Vec<VoiceDetail>), String> {
-    let collections = client.list_collections().await.map_err(|e| e.to_string())?;
+) -> Result<(Vec<CorpusDetail>, Vec<VoiceDetail>), String> {
+    let corpora = client.list_corpora().await.map_err(|e| e.to_string())?;
     let voices = client.list_voices().await.map_err(|e| e.to_string())?;
-    Ok((collections, voices))
+    Ok((corpora, voices))
 }
 
 /// Bind a TCP listener and serve the router until shutdown. Shared by
@@ -410,7 +410,7 @@ async fn handle_page(
 struct SearchParams {
     q: Option<String>,
     voice: Option<String>,
-    collection: Option<String>,
+    corpus: Option<String>,
     limit: Option<u32>,
 }
 
@@ -421,7 +421,7 @@ struct SearchResponseItem {
     snippet: String,
     url: Option<String>,
     title: Option<String>,
-    collection_id: String,
+    corpus_id: String,
 }
 
 #[derive(Serialize)]
@@ -449,24 +449,24 @@ async fn handle_search(
         }
     };
 
-    // Default to the configured collection (the first one) when the request
-    // does not specify ?collection=name. Without a collection filter the
-    // upstream search RPC errors out on multi-collection tenants.
-    let collection_name = p.collection.clone();
-    let collection_id = collection_name
+    // Default to the configured corpus (the first one) when the request
+    // does not specify ?corpus=name. Without a corpus filter the
+    // upstream search RPC errors out on multi-corpus tenants.
+    let corpus_name = p.corpus.clone();
+    let corpus_id = corpus_name
         .as_deref()
-        .and_then(|name| state.enscrive.collection_ids.get(name).cloned())
-        .or_else(|| state.enscrive.default_collection_id.clone());
+        .and_then(|name| state.enscrive.corpus_ids.get(name).cloned())
+        .or_else(|| state.enscrive.default_corpus_id.clone());
 
-    // Resolve the voice: explicit ?voice= > collection's configured voice >
+    // Resolve the voice: explicit ?voice= > corpus's configured voice >
     // search.default_voice > none.
     let voice_name = p
         .voice
         .clone()
         .or_else(|| {
-            collection_name
+            corpus_name
                 .as_deref()
-                .and_then(|n| state.enscrive.collection_default_voice.get(n).cloned())
+                .and_then(|n| state.enscrive.corpus_default_voice.get(n).cloned())
         })
         .or_else(|| state.enscrive.default_voice_name.clone());
     let voice_id = voice_name
@@ -482,7 +482,7 @@ async fn handle_search(
         let body = SearchWithVoiceBody {
             query: query.clone(),
             voice_id,
-            collection_id: collection_id.clone(),
+            corpus_id: corpus_id.clone(),
             limit: Some(limit),
             include_vectors: false,
             filters: None,
@@ -498,7 +498,7 @@ async fn handle_search(
     } else {
         let api_query = ApiSearchQuery {
             query: query.clone(),
-            collection_id,
+            corpus_id,
             filters: Some(SearchFilter::default()),
             limit: Some(limit),
             score_threshold: None,
@@ -542,7 +542,7 @@ async fn handle_search(
                         snippet,
                         url,
                         title,
-                        collection_id: r.collection_id,
+                        corpus_id: r.corpus_id,
                     }
                 })
                 .collect();
@@ -727,16 +727,16 @@ fn build_pages(
     let mut doc_id_to_slug: HashMap<String, String> = HashMap::new();
     let mut seen_slugs: BTreeMap<String, String> = BTreeMap::new();
 
-    for collection in &cfg.collections {
-        let root = if collection.path.is_absolute() {
-            collection.path.clone()
+    for corpus in &cfg.corpora {
+        let root = if corpus.path.is_absolute() {
+            corpus.path.clone()
         } else {
-            config_dir.join(&collection.path)
+            config_dir.join(&corpus.path)
         };
         if !root.exists() {
             return Err(format!(
-                "collection \"{}\" path missing: {}",
-                collection.name,
+                "corpus \"{}\" path missing: {}",
+                corpus.name,
                 root.display()
             ));
         }
@@ -763,7 +763,7 @@ fn build_pages(
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_else(|_| path.to_string_lossy().to_string());
             let doc_id = rel.clone();
-            let slug = make_slug(&rel, collection.url_prefix.as_deref());
+            let slug = make_slug(&rel, corpus.url_prefix.as_deref());
             if let Some(prev) = seen_slugs.insert(slug.clone(), doc_id.clone()) {
                 eprintln!(
                     "warn: slug collision \"{slug}\" between {prev} and {doc_id}; later wins"
@@ -772,7 +772,7 @@ fn build_pages(
             let meta = PageMeta::build(
                 slug.clone(),
                 doc_id.clone(),
-                collection.url_prefix.clone(),
+                corpus.url_prefix.clone(),
                 &rendered.frontmatter,
                 rendered.anchors,
                 rendered.leading_h1,
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn fragment_picks_up_long_heading() {
-        let f = build_text_fragment("## Configuring voices and collections")
+        let f = build_text_fragment("## Configuring voices and corpora")
             .unwrap();
         assert!(f.starts_with("Configuring"), "got: {f}");
     }

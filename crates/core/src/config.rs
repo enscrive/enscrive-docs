@@ -23,7 +23,7 @@ pub struct Config {
     #[serde(default)]
     pub theme: ThemeConfig,
     #[serde(default)]
-    pub collections: Vec<CollectionConfig>,
+    pub corpora: Vec<CorpusConfig>,
     #[serde(default)]
     pub voices: Vec<VoiceConfig>,
     #[serde(default)]
@@ -126,7 +126,7 @@ fn default_theme_variant() -> String {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct CollectionConfig {
+pub struct CorpusConfig {
     pub name: String,
     pub voice: String,
     pub path: PathBuf,
@@ -134,16 +134,16 @@ pub struct CollectionConfig {
     pub glob: String,
     #[serde(default)]
     pub url_prefix: Option<String>,
-    /// Embedding model for `bootstrap` when the collection does not yet exist.
-    /// Ignored when the collection is already present in Enscrive.
+    /// Embedding model for `bootstrap` when the corpus does not yet exist.
+    /// Ignored when the corpus is already present in Enscrive.
     #[serde(default)]
     pub embedding_model: Option<String>,
     /// MRL truncation dimension. Optional; defaults to the model's full output.
-    /// Ignored when the collection already exists.
+    /// Ignored when the corpus already exists.
     #[serde(default)]
     pub dimensions: Option<u32>,
-    /// Human-readable description attached to the collection at create time.
-    /// Ignored when the collection already exists.
+    /// Human-readable description attached to the corpus at create time.
+    /// Ignored when the corpus already exists.
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -171,7 +171,7 @@ pub struct VoiceConfig {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct VersionConfig {
     pub slug: String,
-    pub collections: Vec<String>,
+    pub corpora: Vec<String>,
     #[serde(default)]
     pub default: bool,
 }
@@ -312,7 +312,7 @@ mod tests {
             [site]
             title = "Test Docs"
 
-            [[collections]]
+            [[corpora]]
             name = "guides"
             voice = "guides-voice"
             path = "./docs"
@@ -323,8 +323,8 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(raw).unwrap();
         assert_eq!(cfg.site.title, "Test Docs");
-        assert_eq!(cfg.collections.len(), 1);
-        assert_eq!(cfg.collections[0].glob, "**/*.md");
+        assert_eq!(cfg.corpora.len(), 1);
+        assert_eq!(cfg.corpora[0].glob, "**/*.md");
         assert_eq!(cfg.voices[0].chunking_strategy, "paragraphs");
         assert_eq!(cfg.theme.variant, "neutral");
     }

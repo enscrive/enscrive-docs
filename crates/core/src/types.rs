@@ -7,10 +7,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// -- Collections --
+// -- Corpora --
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct CollectionDetail {
+pub struct CorpusDetail {
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -84,11 +84,11 @@ pub struct DeleteVoiceResponse {
     pub voice_id: String,
 }
 
-// -- Create / Delete collection --
+// -- Create / Delete corpus --
 
-/// Body for `POST /v1/collections`.
+/// Body for `POST /v1/corpora`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct CreateCollectionRequest {
+pub struct CreateCorpusRequest {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -97,11 +97,11 @@ pub struct CreateCollectionRequest {
     pub dimensions: Option<u32>,
 }
 
-/// Response from `DELETE /v1/collections/{id}`.
+/// Response from `DELETE /v1/corpora/{id}`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct DeleteCollectionResponse {
+pub struct DeleteCorpusResponse {
     pub deleted: bool,
-    pub collection_id: String,
+    pub corpus_id: String,
 }
 
 // -- Ingest --
@@ -118,7 +118,7 @@ pub struct IngestDocument {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct IngestRequest {
-    pub collection_id: String,
+    pub corpus_id: String,
     pub documents: Vec<IngestDocument>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice_id: Option<String>,
@@ -153,7 +153,7 @@ pub struct IngestProgressEvent {
 pub struct SearchQuery {
     pub query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub collection_id: Option<String>,
+    pub corpus_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filters: Option<SearchFilter>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -193,7 +193,7 @@ pub struct SearchFilter {
 pub struct SearchResultItem {
     pub id: String,
     pub document_id: String,
-    pub collection_id: String,
+    pub corpus_id: String,
     pub score: f32,
     pub content: String,
     #[serde(default)]
@@ -212,7 +212,7 @@ pub struct SearchWithVoiceBody {
     pub query: String,
     pub voice_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub collection_id: Option<String>,
+    pub corpus_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
     pub include_vectors: bool,

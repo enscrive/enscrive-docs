@@ -32,11 +32,11 @@ pub struct WatchArgs {
 pub async fn run(global: GlobalArgs, args: WatchArgs) -> Result<(), String> {
     let state = setup_state(&global, args.base_path.as_deref(), /* watch_mode */ true).await?;
 
-    // Collect every collection's source root so the watcher can pick up
+    // Collect every corpus's source root so the watcher can pick up
     // changes anywhere in the configured tree.
     let mut roots: Vec<PathBuf> = state
         .cfg
-        .collections
+        .corpora
         .iter()
         .map(|c| {
             if c.path.is_absolute() {

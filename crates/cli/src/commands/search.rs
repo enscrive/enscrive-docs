@@ -11,11 +11,11 @@ pub struct SearchArgs {
     /// The query string
     pub query: String,
 
-    /// Limit results to a configured collection (defaults to the first one)
+    /// Limit results to a configured corpus (defaults to the first one)
     #[arg(long)]
-    pub collection: Option<String>,
+    pub corpus: Option<String>,
 
-    /// Voice name (defaults to the collection's configured voice, then [search] default_voice)
+    /// Voice name (defaults to the corpus's configured voice, then [search] default_voice)
     #[arg(long)]
     pub voice: Option<String>,
 
@@ -53,23 +53,23 @@ pub async fn run(global: GlobalArgs, args: SearchArgs) -> Result<(), String> {
     let provider_key = cfg.resolved_provider_key(global.embedding_provider_key.as_deref());
     let client = EnscriveClient::with_provider_key(endpoint, api_key, provider_key);
 
-    // Resolve collection -> id and voice -> id with the same defaults the
+    // Resolve corpus -> id and voice -> id with the same defaults the
     // serve handler uses, so behavior is consistent across the CLI and
     // HTTP search surfaces.
-    let collections = client.list_collections().await.map_err(|e| e.to_string())?;
+    let corpora = client.list_corpora().await.map_err(|e| e.to_string())?;
     let voices = client.list_voices().await.map_err(|e| e.to_string())?;
 
-    let collection_name = args
-        .collection
+    let corpus_name = args
+        .corpus
         .clone()
-        .or_else(|| cfg.collections.first().map(|c| c.name.clone()));
-    let collection_id = collection_name
+        .or_else(|| cfg.corpora.first().map(|c| c.name.clone()));
+    let corpus_id = corpus_name
         .as_deref()
-        .and_then(|name| collections.iter().find(|c| c.name == name).map(|c| c.id.clone()));
-    if let Some(name) = collection_name.as_deref() {
-        if collection_id.is_none() {
+        .and_then(|name| corpora.iter().find(|c| c.name == name).map(|c| c.id.clone()));
+    if let Some(name) = corpus_name.as_deref() {
+        if corpus_id.is_none() {
             return Err(format!(
-                "collection \"{name}\" is not present in the Enscrive tenant; create it before searching"
+                "corpus \"{name}\" is not present in the Enscrive tenant; create it before searching"
             ));
         }
     }
@@ -78,9 +78,9 @@ pub async fn run(global: GlobalArgs, args: SearchArgs) -> Result<(), String> {
         .voice
         .clone()
         .or_else(|| {
-            collection_name
+            corpus_name
                 .as_deref()
-                .and_then(|cn| cfg.collections.iter().find(|c| c.name == cn))
+                .and_then(|cn| cfg.corpora.iter().find(|c| c.name == cn))
                 .map(|c| c.voice.clone())
         })
         .or_else(|| cfg.search.default_voice.clone());
@@ -93,7 +93,7 @@ pub async fn run(global: GlobalArgs, args: SearchArgs) -> Result<(), String> {
             .search_with_voice(&SearchWithVoiceBody {
                 query: args.query.clone(),
                 voice_id,
-                collection_id: collection_id.clone(),
+                corpus_id: corpus_id.clone(),
                 limit: Some(args.limit),
                 include_vectors: false,
                 filters: None,
@@ -110,7 +110,7 @@ pub async fn run(global: GlobalArgs, args: SearchArgs) -> Result<(), String> {
         client
             .search(&ApiSearchQuery {
                 query: args.query.clone(),
-                collection_id,
+                corpus_id,
                 limit: Some(args.limit),
                 include_vectors: false,
                 ..Default::default()
@@ -142,11 +142,11 @@ fn print_human(query: &str, results: &SearchResults) {
     for (i, r) in results.results.iter().enumerate() {
         println!();
         println!(
-            "  [{i}] score={score:.3}  document={doc}  collection={coll}",
+            "  [{i}] score={score:.3}  document={doc}  corpus={coll}",
             i = i + 1,
             score = r.score,
             doc = r.document_id,
-            coll = short_id(&r.collection_id)
+            coll = short_id(&r.corpus_id)
         );
         let snippet = compact_snippet(&r.content, 240);
         println!("      {snippet}");
@@ -191,7 +191,7 @@ fn item_to_json(r: &SearchResultItem) -> serde_json::Value {
     serde_json::json!({
         "id": r.id,
         "document_id": r.document_id,
-        "collection_id": r.collection_id,
+        "corpus_id": r.corpus_id,
         "score": r.score,
         "content": r.content,
         "snippet": compact_snippet(&r.content, 280),

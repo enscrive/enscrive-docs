@@ -55,7 +55,7 @@ pub async fn run(global: GlobalArgs, args: InitArgs) -> Result<(), String> {
             "set ENSCRIVE_API_KEY or fill in [enscrive] api_key before running `enscrive-docs ingest`"
         );
     }
-    println!("next: edit collections + voices, then run `enscrive-docs ingest`");
+    println!("next: edit corpora + voices, then run `enscrive-docs ingest`");
     Ok(())
 }
 
@@ -109,11 +109,11 @@ variant = "{theme_variant}"        # "neutral" (default) or "enscrive"
 # custom_css = "./custom.css"
 # template_dir = "./templates"
 
-# Each [[collections]] entry maps a directory of markdown files to an
-# Enscrive collection. `enscrive-docs bootstrap` creates the collection if
+# Each [[corpora]] entry maps a directory of markdown files to an
+# Enscrive corpus. `enscrive-docs bootstrap` creates the corpus if
 # it does not already exist (skip-if-exists); once it exists, the
 # embedding_model / dimensions / description fields are ignored.
-[[collections]]
+[[corpora]]
 name = "guides"
 voice = "guides-voice"
 path = "./docs"

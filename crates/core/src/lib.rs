@@ -11,12 +11,12 @@ pub mod types;
 
 pub use client::{EnscriveClient, IngestProgress};
 pub use config::{
-    CollectionConfig, Config, EnscriveAuthConfig, ReturnConfig, SearchConfig, ServeConfig,
+    CorpusConfig, Config, EnscriveAuthConfig, ReturnConfig, SearchConfig, ServeConfig,
     SiteConfig, ThemeConfig, VersionConfig, VoiceConfig,
 };
 pub use error::{EnscriveError, Result};
 pub use types::{
-    CollectionDetail, CreateCollectionRequest, CreateVoiceApiRequest, DeleteCollectionResponse,
+    CorpusDetail, CreateCorpusRequest, CreateVoiceApiRequest, DeleteCorpusResponse,
     DeleteVoiceResponse, IngestDocument, IngestProgressEvent, IngestRequest, SearchFilter,
     SearchQuery, SearchResultItem, SearchResults, SearchWithVoiceBody, UpdateVoiceApiRequest,
     VoiceConfigApi, VoiceDetail,

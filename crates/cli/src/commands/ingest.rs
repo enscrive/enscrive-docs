@@ -1,7 +1,7 @@
 use crate::global::GlobalArgs;
 use clap::Args;
 use enscrive_docs_core::{
-    CollectionConfig, Config, EnscriveClient, IngestDocument, IngestRequest, VoiceConfig,
+    CorpusConfig, Config, EnscriveClient, IngestDocument, IngestRequest, VoiceConfig,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -10,9 +10,9 @@ use walkdir::WalkDir;
 
 #[derive(Args, Clone, Debug)]
 pub struct IngestArgs {
-    /// Limit ingest to one configured collection by name
+    /// Limit ingest to one configured corpus by name
     #[arg(long)]
-    pub collection: Option<String>,
+    pub corpus: Option<String>,
 
     /// Walk the file tree but do not POST to /v1/ingest
     #[arg(long)]
@@ -31,9 +31,9 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
         .unwrap_or_else(|| PathBuf::from("."));
     let cfg = Config::load(&config_path).map_err(|e| e.to_string())?;
 
-    if cfg.collections.is_empty() {
+    if cfg.corpora.is_empty() {
         return Err(format!(
-            "no [[collections]] defined in {}",
+            "no [[corpora]] defined in {}",
             config_path.display()
         ));
     }
@@ -50,15 +50,15 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
         let provider_key =
             cfg.resolved_provider_key(global.embedding_provider_key.as_deref());
         let client = EnscriveClient::with_provider_key(endpoint, api_key, provider_key);
-        let collections = client.list_collections().await.map_err(|e| e.to_string())?;
+        let corpora = client.list_corpora().await.map_err(|e| e.to_string())?;
         let voices = client.list_voices().await.map_err(|e| e.to_string())?;
-        Some((client, collections, voices))
+        Some((client, corpora, voices))
     };
 
     let mut total_docs = 0usize;
-    let mut total_collections = 0usize;
-    for entry in &cfg.collections {
-        if let Some(only) = args.collection.as_deref() {
+    let mut total_corpora = 0usize;
+    for entry in &cfg.corpora {
+        if let Some(only) = args.corpus.as_deref() {
             if entry.name != only {
                 continue;
             }
@@ -69,7 +69,7 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
             .find(|v| v.name == entry.voice)
             .ok_or_else(|| {
                 format!(
-                    "collection \"{}\" references voice \"{}\" which is not in [[voices]]",
+                    "corpus \"{}\" references voice \"{}\" which is not in [[voices]]",
                     entry.name, entry.voice
                 )
             })?;
@@ -100,20 +100,20 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
                 );
             }
             total_docs += docs.len();
-            total_collections += 1;
+            total_corpora += 1;
             continue;
         }
 
-        let (client, collections, voices) = remote
+        let (client, corpora, voices) = remote
             .as_ref()
             .expect("remote must exist when not dry-run");
-        let collection_id = collections
+        let corpus_id = corpora
             .iter()
             .find(|c| c.name == entry.name)
             .map(|c| c.id.clone())
             .ok_or_else(|| {
                 format!(
-                    "Enscrive collection \"{}\" not found. Create it via the Enscrive UI or `enscrive collections create` before ingesting.",
+                    "Enscrive corpus \"{}\" not found. Create it via the Enscrive UI or `enscrive corpus create` before ingesting.",
                     entry.name
                 )
             })?;
@@ -129,15 +129,15 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
             })?;
 
         println!(
-            "[{}] {} document(s) -> collection {} (voice: {})",
+            "[{}] {} document(s) -> corpus {} (voice: {})",
             entry.name,
             docs.len(),
-            collection_id,
+            corpus_id,
             entry.voice
         );
 
         let req = IngestRequest {
-            collection_id,
+            corpus_id,
             documents: docs,
             voice_id: Some(voice_id),
             dry_run: false,
@@ -164,7 +164,7 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
                     }
                 }
                 total_docs += succeeded;
-                total_collections += 1;
+                total_corpora += 1;
             }
             Err(e) => {
                 return Err(format!("ingest \"{}\" failed: {e}", entry.name));
@@ -173,30 +173,30 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
     }
 
     println!(
-        "\ndone: {total_docs} document(s) across {total_collections} collection(s)"
+        "\ndone: {total_docs} document(s) across {total_corpora} corpus(a)"
     );
     Ok(())
 }
 
 fn build_documents(
     config_dir: &Path,
-    collection: &CollectionConfig,
+    corpus: &CorpusConfig,
     _voice: &VoiceConfig,
 ) -> Result<Vec<IngestDocument>, String> {
-    let root = if collection.path.is_absolute() {
-        collection.path.clone()
+    let root = if corpus.path.is_absolute() {
+        corpus.path.clone()
     } else {
-        config_dir.join(&collection.path)
+        config_dir.join(&corpus.path)
     };
     if !root.exists() {
         return Err(format!(
-            "collection \"{}\" path does not exist: {}",
-            collection.name,
+            "corpus \"{}\" path does not exist: {}",
+            corpus.name,
             root.display()
         ));
     }
 
-    let extension_filter = derive_extension_from_glob(&collection.glob);
+    let extension_filter = derive_extension_from_glob(&corpus.glob);
     let mut docs = Vec::new();
 
     for entry in WalkDir::new(&root)
@@ -220,7 +220,7 @@ fn build_documents(
         let id = relative_doc_id(&root, path);
         let mut metadata = HashMap::new();
         metadata.insert("source_path".to_string(), id.clone());
-        if let Some(prefix) = &collection.url_prefix {
+        if let Some(prefix) = &corpus.url_prefix {
             metadata.insert("url_prefix".to_string(), prefix.clone());
         }
         let fingerprint = fingerprint_content(&content);

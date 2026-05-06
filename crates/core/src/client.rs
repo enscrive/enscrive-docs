@@ -5,7 +5,7 @@
 
 use crate::error::{EnscriveError, Result};
 use crate::types::{
-    CollectionDetail, CreateCollectionRequest, CreateVoiceApiRequest, DeleteCollectionResponse,
+    CorpusDetail, CreateCorpusRequest, CreateVoiceApiRequest, DeleteCorpusResponse,
     DeleteVoiceResponse, IngestProgressEvent, IngestRequest, SearchQuery, SearchResults,
     SearchWithVoiceBody, UpdateVoiceApiRequest, VoiceDetail,
 };
@@ -95,34 +95,34 @@ impl EnscriveClient {
         serde_json::from_str(&text).map_err(EnscriveError::from)
     }
 
-    // -- Collections --
+    // -- Corpora --
 
-    pub async fn list_collections(&self) -> Result<Vec<CollectionDetail>> {
-        self.send_typed::<Vec<CollectionDetail>>(Method::GET, "/v1/collections", NONE)
+    pub async fn list_corpora(&self) -> Result<Vec<CorpusDetail>> {
+        self.send_typed::<Vec<CorpusDetail>>(Method::GET, "/v1/corpora", NONE)
             .await
     }
 
-    pub async fn get_collection(&self, id: &str) -> Result<CollectionDetail> {
-        self.send_typed::<CollectionDetail>(
+    pub async fn get_corpus(&self, id: &str) -> Result<CorpusDetail> {
+        self.send_typed::<CorpusDetail>(
             Method::GET,
-            &format!("/v1/collections/{id}"),
+            &format!("/v1/corpora/{id}"),
             NONE,
         )
         .await
     }
 
-    pub async fn create_collection(
+    pub async fn create_corpus(
         &self,
-        request: &CreateCollectionRequest,
-    ) -> Result<CollectionDetail> {
-        self.send_typed::<CollectionDetail>(Method::POST, "/v1/collections", Some(request))
+        request: &CreateCorpusRequest,
+    ) -> Result<CorpusDetail> {
+        self.send_typed::<CorpusDetail>(Method::POST, "/v1/corpora", Some(request))
             .await
     }
 
-    pub async fn delete_collection(&self, id: &str) -> Result<DeleteCollectionResponse> {
-        self.send_typed::<DeleteCollectionResponse>(
+    pub async fn delete_corpus(&self, id: &str) -> Result<DeleteCorpusResponse> {
+        self.send_typed::<DeleteCorpusResponse>(
             Method::DELETE,
-            &format!("/v1/collections/{id}"),
+            &format!("/v1/corpora/{id}"),
             NONE,
         )
         .await
@@ -244,7 +244,7 @@ impl EnscriveClient {
     }
 
     /// Voice-tuned search (POST /v1/voices/search). Uses the voice's
-    /// chunking+retrieval config rather than raw collection defaults.
+    /// chunking+retrieval config rather than raw corpus defaults.
     pub async fn search_with_voice(&self, body: &SearchWithVoiceBody) -> Result<SearchResults> {
         self.send_typed::<SearchResults>(Method::POST, "/v1/voices/search", Some(body))
             .await
@@ -254,7 +254,7 @@ impl EnscriveClient {
 
     pub async fn ping(&self) -> Result<StatusCode> {
         let response = self
-            .auth(self.http.get(self.url("/v1/collections")))
+            .auth(self.http.get(self.url("/v1/corpora")))
             .send()
             .await?;
         Ok(response.status())

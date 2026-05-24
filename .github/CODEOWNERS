@@ -1,0 +1,11 @@
+# CODEOWNERS — Cloud-Native Dev Topology PRD §6.7
+#
+# Founder review (@chrisroge) is REQUIRED, in addition to automated/agent
+# review, for high-risk paths. enscrive-docs has no high-risk service paths;
+# under §6.7 the only applicable rule is dependency manifests.
+#
+# Enforcement note: to make this a hard gate, the repo's branch protection
+# must also enable "Require review from Code Owners".
+
+# Dependency manifests — major version bumps carry dependency-rot risk.
+**/Cargo.toml @chrisroge

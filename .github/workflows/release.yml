@@ -1,9 +1,15 @@
 name: release
 
 on:
-  push:
-    tags:
-      - "v*"
+    push:
+      tags:
+        - "v*"
+    workflow_dispatch:
+      inputs:
+        ref_name:
+          description: "Tag or ref name to use for the artifact path (e.g. v0.1.0)."
+          required: true
+          type: string
 
 permissions:
   id-token: write

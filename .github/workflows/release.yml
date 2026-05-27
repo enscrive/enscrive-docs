@@ -31,29 +31,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The two glibc-linked targets MUST build on ubuntu-22.04 (glibc 2.35).
-          # ubuntu-latest currently resolves to ubuntu-24.04 whose glibc 2.39
-          # produces binaries that fail on Ubuntu 22.04 LTS — the most common
-          # Linux LTS server distribution. Pin to 22.04 so the binary runs on
-          # Ubuntu 22.04+, Debian 12+, Fedora 36+, CentOS Stream 9+, and any
-          # newer glibc system. Musl is glibc-independent so its build host
-          # can stay on ubuntu-latest.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
-            cross: false
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04
-            cross: true
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-            cross: true
-          # x86_64-apple-darwin dropped 2026-04-26: GitHub macos-13 runner
-          # capacity is permanently starved (Apple/GH deprecating Intel Mac
-          # builds). Apple Silicon users are served by aarch64-apple-darwin;
-          # remaining Intel Mac users build from source or run aarch64 under
-          # Rosetta. Enscrive Deploy Modernization tracks this in DEPLOY-012.
-          - target: aarch64-apple-darwin
-            os: macos-latest
+            os: [self-hosted, enscrive-builder]
             cross: false
     steps:
       - name: Checkout
@@ -154,7 +133,7 @@ jobs:
   aggregate:
     name: aggregate + release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, enscrive-builder]
     steps:
       - name: Checkout
         uses: actions/checkout@v4

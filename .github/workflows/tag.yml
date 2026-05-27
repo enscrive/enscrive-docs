@@ -1,0 +1,45 @@
+name: tag-on-merge
+
+# Auto-tag every push to main with vYYYYMMDD-HHMM UTC.
+#
+# Cloud-Native Dev Topology PRD §5.6 — "merge → tag" automation.
+# Per founder direction (ENS-536, 2026-05-27): this workflow STOPS at tag
+# creation. Auto-triggering release.yml from the new tag is intentionally
+# NOT enabled in this iteration — the founder dispatches release.yml
+# manually via `gh workflow run release.yml --ref refs/tags/<TAG>` until
+# the auto-dispatch story is decided (PAT or GitHub App).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tag-on-merge
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create and push vYYYYMMDD-HHMM tag
+        run: |
+          set -euo pipefail
+          TAG="v$(date -u +%Y%m%d-%H%M)"
+          if git rev-parse --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+            TAG="${TAG}-${GITHUB_SHA::7}"
+          fi
+          echo "tag=${TAG}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Auto-tag on merge to main: ${GITHUB_SHA}"
+          git push origin "${TAG}"
+          echo "Pushed ${TAG}"

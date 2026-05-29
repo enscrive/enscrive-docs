@@ -1,13 +1,13 @@
 mod commands;
 mod global;
+mod version;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use global::GlobalArgs;
 
 #[derive(Parser)]
 #[command(
     name = "enscrive-docs",
-    version,
     about = "Retrieval-native documentation backed by Enscrive neural search"
 )]
 struct Cli {
@@ -50,7 +50,10 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let matches = Cli::command()
+        .version(version::VERSION)
+        .get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let result = match cli.command {
         Command::Init(args) => commands::init::run(cli.global, args).await,
         Command::Bootstrap(args) => commands::bootstrap::run(cli.global, args).await,

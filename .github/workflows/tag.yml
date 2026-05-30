@@ -1,13 +1,20 @@
 name: tag-on-merge
 
-# Auto-tag every push to main with vYYYYMMDD-HHMM UTC.
+# Auto-tag every push to main with vYYYYMMDD-HHMM UTC, then dispatch release.yml.
 #
-# Cloud-Native Dev Topology PRD §5.6 — "merge → tag" automation.
-# Per founder direction (ENS-536, 2026-05-27): this workflow STOPS at tag
-# creation. Auto-triggering release.yml from the new tag is intentionally
-# NOT enabled in this iteration — the founder dispatches release.yml
-# manually via `gh workflow run release.yml --ref refs/tags/<TAG>` until
-# the auto-dispatch story is decided (PAT or GitHub App).
+# Cloud-Native Dev Topology PRD §5.6 — "merge → tag → release" automation.
+#
+# ENS-560 (2026-05-30) re-enables the auto-dispatch the founder paused in
+# ENS-536: after creating the tag, this workflow dispatches release.yml on the
+# new tag ref. This is the closed-door DOOR — armed only after the cosign
+# verify-at-provision LOCK (ENS-559) merged + installed.
+#
+# Why no PAT/App is needed: a GITHUB_TOKEN tag-PUSH cannot trigger release.yml's
+# `push: tags` (anti-recursion), but `workflow_dispatch` events ALWAYS create a
+# run even when triggered by GITHUB_TOKEN (documented exception). So we dispatch
+# release.yml explicitly with the ephemeral per-run GITHUB_TOKEN — no long-lived
+# credential. release.yml publishes to DEV only, via the dev-scoped
+# `enscrive-releases-publisher` OIDC role; there is no stage/prod surface here.
 
 on:
   push:
@@ -16,6 +23,7 @@ on:
 
 permissions:
   contents: write
+  actions: write   # ENS-560: dispatch release.yml after tagging
 
 concurrency:
   group: tag-on-merge
@@ -31,6 +39,7 @@ jobs:
           fetch-depth: 0
 
       - name: Create and push vYYYYMMDD-HHMM tag
+        id: tag
         run: |
           set -euo pipefail
           TAG="v$(date -u +%Y%m%d-%H%M)"
@@ -38,8 +47,34 @@ jobs:
             TAG="${TAG}-${GITHUB_SHA::7}"
           fi
           echo "tag=${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "${TAG}" -m "Auto-tag on merge to main: ${GITHUB_SHA}"
           git push origin "${TAG}"
           echo "Pushed ${TAG}"
+
+      - name: Dispatch release.yml for the new tag (ENS-560 — re-enable auto-publish)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # workflow_dispatch ALWAYS creates a run, even via GITHUB_TOKEN, so this
+          # fires release.yml without any long-lived credential. Dispatch on the
+          # immutable tag ref so the build + cosign signing identity are pinned to
+          # the tag. The tag was just pushed and may not be visible to the
+          # dispatch API immediately, so settle briefly and retry.
+          for attempt in 1 2 3; do
+            if gh workflow run release.yml \
+                 --repo "${GITHUB_REPOSITORY}" \
+                 --ref "${TAG}" \
+                 -f ref_name="${TAG}"; then
+              echo "Dispatched release.yml on tag ${TAG}"
+              exit 0
+            fi
+            echo "::warning::dispatch attempt ${attempt} failed; tag ref may not be visible yet — retrying in 5s"
+            sleep 5
+          done
+          echo "::error::failed to dispatch release.yml for ${TAG} after 3 attempts"
+          exit 1

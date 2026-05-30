@@ -9,3 +9,7 @@
 
 # Dependency manifests — major version bumps carry dependency-rot risk.
 **/Cargo.toml @chrisroge
+
+# CI/CD workflows — supply-chain critical (release, signing, auto-publish on
+# merge per ENS-560). Founder-owned (ADR-0003 / PRD §6.7).
+/.github/workflows/** @chrisroge

@@ -1,0 +1,72 @@
+name: pr-review
+
+# Closed-loop automated PR reviewer (ENS-569). All logic lives in
+# .github/scripts/pr-review.sh; this file stays minimal and ASCII-clean.
+#
+# On a non-draft PR: a headless `claude -p` reviewer judges the diff and emits a
+# structured decision. On approve + sufficient confidence, a GitHub App identity
+# (minted at runtime, not a long-lived PAT) posts APPROVE and enables native
+# auto-merge; GitHub merges once the required ci/* checks are green. Self-skips
+# (green) until the App + key secrets are set. See ENS-569.
+#
+# Required secrets (org-level):
+#   REVIEWER_APP_ID           - the reviewer GitHub App's numeric id
+#   REVIEWER_APP_PRIVATE_KEY  - that App's PEM private key
+#   ANTHROPIC_API_KEY         - metered key for the claude -p reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: review
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gate on reviewer secrets
+        id: gate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          APP_ID: ${{ secrets.REVIEWER_APP_ID }}
+          APP_KEY: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY:-}" ] || [ -z "${APP_ID:-}" ] || [ -z "${APP_KEY:-}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Reviewer secrets (ANTHROPIC_API_KEY / REVIEWER_APP_ID / REVIEWER_APP_PRIVATE_KEY) not set yet; skipping (job stays green)."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint reviewer App token
+        id: apptoken
+        if: steps.gate.outputs.configured == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.REVIEWER_APP_ID }}
+          private-key: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
+
+      - name: Install Claude Code CLI
+        if: steps.gate.outputs.configured == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Review and act
+        if: steps.gate.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ steps.apptoken.outputs.token }}
+          REVIEWER_BOT_LOGIN: ${{ steps.apptoken.outputs.app-slug }}[bot]
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR: ${{ github.event.pull_request.number }}
+          APPROVE_THRESHOLD: "0.80"
+          DIFF_CHAR_CAP: "120000"
+        run: bash .github/scripts/pr-review.sh

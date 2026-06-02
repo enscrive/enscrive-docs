@@ -45,10 +45,23 @@ if [ "${#DIFF}" -gt "$CAP" ]; then
   TRUNCATED=1
 fi
 
-# High-risk paths (ADR-0003 section 6.7 + the meta-pipeline). High risk escalates
-# the model; per ENS-569 it does NOT force a human gate (adversarial CI gates do).
+# FOUNDER-GATED paths: the root-of-trust. The reviewer NEVER auto-merges changes
+# to its own harness, to any workflow (the gating layer itself), or to the
+# release trust pipeline (cosign verify / provision / channel routing). These
+# escalate to a human (needs-founder) instead of auto-merging. ENS-569 Gap-4
+# refinement: the thing that judges every other PR must not merge its own
+# changes on its own approval.
+FOUNDER_GATED=0
+if printf '%s' "$FILES" | grep -qE '\.github/workflows/|\.github/scripts/|channels/|src/signature\.rs|src/provision\.rs|src/manifest\.rs|src/fingerprint\.rs'; then
+  FOUNDER_GATED=1
+fi
+
+# High-risk paths escalate the review model (Sonnet -> Opus); this does NOT block
+# on its own. Tracks the real trust surface (auth, billing/metering/ledger,
+# tenant isolation, migrations, proto, crypto, secrets) so the stronger reviewer
+# judges those changes, per ENS-569 Gap-2.
 HIGH_RISK=0
-if printf '%s' "$FILES" | grep -qE '\.github/workflows/|\.github/scripts/|Cargo\.toml|CODEOWNERS'; then
+if printf '%s' "$FILES" | grep -qiE '\.github/workflows/|\.github/scripts/|Cargo\.toml|CODEOWNERS|/migrations/|/proto/|billing|metering|credits|ledger|rbac|crypto|byok|byom|tenant_isolation|hmac|/audit|secrets|keycloak|/auth'; then
   HIGH_RISK=1
 fi
 
@@ -131,6 +144,22 @@ SUMMARY=$(jq -r '.summary // ""' /tmp/decision.json)
 ISSUES=$(jq -r '(.blocking_issues // []) | map("- " + .) | join("\n")' /tmp/decision.json)
 HRNOTES=$(jq -r '.high_risk_notes // ""' /tmp/decision.json)
 PASS_CONF=$(awk -v c="$CONF" -v t="$THRESHOLD" 'BEGIN{print (c+0>=t+0)?"1":"0"}')
+
+# Root-of-trust changes are NEVER auto-merged, whatever the model verdict. Post
+# the review as guidance, label needs-founder, and stop (no approval) so branch
+# protection holds the PR for a human merge. The check stays green: this is a
+# deliberate hold, not a failure.
+if [ "$FOUNDER_GATED" = "1" ]; then
+  echo "FOUNDER-GATED path touched -> escalate to founder (no auto-merge)"
+  gh label create needs-founder --color B60205 \
+    --description "Touches root-of-trust: reviewer harness / workflows / release trust pipeline" 2>/dev/null || true
+  gh pr edit "$PR" --add-label needs-founder || true
+  EXTRA=""
+  [ -n "$ISSUES" ] && EXTRA=$(printf '\n\nReviewer notes:\n%s' "$ISSUES")
+  BODY_MD=$(printf '[auto-review] (ENS-569): **FOUNDER MERGE REQUIRED** — this PR touches the root-of-trust (the reviewer harness, a workflow, or the release trust pipeline), which is never auto-merged. Reviewer assessment (model %s, confidence %s — this is NOT an approval):\n\n%s%s' "$MODEL" "$CONF" "$SUMMARY" "$EXTRA")
+  gh pr comment "$PR" --body "$BODY_MD"
+  exit 0
+fi
 
 if [ "$DECISION" = "approve" ] && [ "$PASS_CONF" = "1" ] && [ "$TRUNCATED" != "1" ]; then
   echo "APPROVE + auto-merge (confidence $CONF)"

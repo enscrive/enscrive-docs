@@ -55,6 +55,13 @@ FOUNDER_GATED=0
 if printf '%s' "$FILES" | grep -qE '\.github/workflows/|\.github/scripts/|channels/|src/signature\.rs|src/provision\.rs|src/manifest\.rs|src/fingerprint\.rs'; then
   FOUNDER_GATED=1
 fi
+# enscrive-secrets-manager (esm) is a trust anchor — the secrets manager itself.
+# It is dispatchable (a worker may propose changes), but EVERY change to it is
+# founder-merged, never auto-merged, whatever files it touches. (Secret VALUES
+# remain founder-only regardless; this gates esm CODE at the merge boundary.)
+case "$REPO" in
+  */enscrive-secrets-manager) FOUNDER_GATED=1 ;;
+esac
 
 # High-risk paths escalate the review model (Sonnet -> Opus); this does NOT block
 # on its own. Tracks the real trust surface (auth, billing/metering/ledger,

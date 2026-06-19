@@ -38,7 +38,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: [self-hosted, enscrive-builder]
+            os: ubuntu-latest
             cross: false
     steps:
       - name: Checkout
@@ -139,7 +139,7 @@ jobs:
   aggregate:
     name: aggregate + release
     needs: build
-    runs-on: [self-hosted, enscrive-builder]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -511,7 +511,6 @@ dependencies = [
 name = "enscrive-docs-core"
 version = "0.0.2"
 dependencies = [
- "futures-util",
  "reqwest",
  "serde",
  "serde_json",

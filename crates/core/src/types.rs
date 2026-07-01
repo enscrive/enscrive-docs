@@ -129,22 +129,58 @@ pub struct IngestRequest {
     pub no_batch: Option<bool>,
 }
 
+/// Response from `POST /v1/ingest` under the async-by-default contract
+/// (ENS-628 / /v1 platform-wide policy 2026-05-14): the server validates
+/// cheaply, enqueues a background import job, and answers `202 Accepted`
+/// with this object instead of the old synchronous SSE-array-of-events
+/// shape. There is no synchronous per-document event stream any more —
+/// the client polls `poll_url` (`GET /v1/jobs/{job_id}`) until the job
+/// reaches a terminal `status`. Mirrors
+/// `enscrive-developer::types_api::JobLaunchResponse` exactly (job_id,
+/// status, poll_url — no other fields on the wire).
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct IngestProgressEvent {
-    pub document_id: String,
+pub struct JobLaunchResponse {
+    pub job_id: String,
+    pub status: String,
+    pub poll_url: String,
+}
+
+/// Subset of `enscrive-developer::types_api::ImportJobResponse`
+/// (`GET /v1/jobs/{job_id}`) that the docs client needs to poll an ingest
+/// job to completion and summarize the outcome. `#[serde(default)]` on
+/// non-identifying fields tolerates upstream additions/omissions; extra
+/// upstream fields are simply ignored by struct deserialization.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ImportJobStatus {
+    pub id: String,
     pub status: String,
     #[serde(default)]
-    pub chunks_created: Option<u32>,
-    #[serde(default)]
-    pub embeddings_stored: Option<u32>,
-    #[serde(default)]
-    pub tokens_used: Option<u32>,
-    #[serde(default)]
-    pub error_message: Option<String>,
+    pub phase: String,
     #[serde(default)]
     pub progress_percent: f32,
     #[serde(default)]
-    pub chunks_unchanged: Option<u32>,
+    pub total_documents: i32,
+    #[serde(default)]
+    pub documents_ingested: i32,
+    #[serde(default)]
+    pub documents_failed: i32,
+    #[serde(default)]
+    pub error_message: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// Terminal outcome of an ingest, produced by polling the background job
+/// to completion. Returned by [`crate::EnscriveClient::ingest`].
+#[derive(Clone, Debug)]
+pub struct IngestSummary {
+    pub job_id: String,
+    /// Terminal server status string (e.g. `complete`, `failed`).
+    pub status: String,
+    pub documents_ingested: i32,
+    pub documents_failed: i32,
+    pub error_message: Option<String>,
+    pub warnings: Vec<String>,
 }
 
 // -- Search --

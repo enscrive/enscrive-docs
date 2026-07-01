@@ -136,34 +136,33 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
             entry.voice
         );
 
+        // `sync`/SSE are retired (async-by-default, ENS-628): the server
+        // accepts-and-ignores them and always answers 202 + JobLaunchResponse,
+        // so the client no longer asks for either — `client.ingest()` posts,
+        // then polls `GET /v1/jobs/{job_id}` to terminal itself.
         let req = IngestRequest {
             corpus_id,
             documents: docs,
             voice_id: Some(voice_id),
             dry_run: false,
-            sync: Some(true),
+            sync: None,
             no_batch: None,
         };
 
+        println!("  job launched, polling to terminal...");
         match client.ingest(&req).await {
-            Ok(events) => {
-                let succeeded = events
-                    .iter()
-                    .filter(|e| e.error_message.is_none())
-                    .count();
-                let failed = events.len() - succeeded;
+            Ok(summary) => {
                 println!(
-                    "  ingested: {} ok / {} failed ({} events total)",
-                    succeeded,
-                    failed,
-                    events.len()
+                    "  ingested: {} ok / {} failed (job {}, status: {})",
+                    summary.documents_ingested,
+                    summary.documents_failed,
+                    summary.job_id,
+                    summary.status
                 );
-                for ev in events.iter().filter(|e| e.error_message.is_some()) {
-                    if let Some(err) = ev.error_message.as_deref() {
-                        println!("  ! {}: {err}", ev.document_id);
-                    }
+                for warning in &summary.warnings {
+                    println!("  ! warning: {warning}");
                 }
-                total_docs += succeeded;
+                total_docs += summary.documents_ingested as usize;
                 total_corpora += 1;
             }
             Err(e) => {

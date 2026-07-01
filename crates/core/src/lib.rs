@@ -7,9 +7,10 @@
 pub mod client;
 pub mod config;
 pub mod error;
+pub mod jobs_polling;
 pub mod types;
 
-pub use client::{EnscriveClient, IngestProgress};
+pub use client::EnscriveClient;
 pub use config::{
     CorpusConfig, Config, EnscriveAuthConfig, ReturnConfig, SearchConfig, ServeConfig,
     SiteConfig, ThemeConfig, VersionConfig, VoiceConfig,
@@ -17,7 +18,7 @@ pub use config::{
 pub use error::{EnscriveError, Result};
 pub use types::{
     CorpusDetail, CreateCorpusRequest, CreateVoiceApiRequest, DeleteCorpusResponse,
-    DeleteVoiceResponse, IngestDocument, IngestProgressEvent, IngestRequest, SearchFilter,
-    SearchQuery, SearchResultItem, SearchResults, SearchWithVoiceBody, UpdateVoiceApiRequest,
-    VoiceConfigApi, VoiceDetail,
+    DeleteVoiceResponse, ImportJobStatus, IngestDocument, IngestRequest, IngestSummary,
+    JobLaunchResponse, SearchFilter, SearchQuery, SearchResultItem, SearchResults,
+    SearchWithVoiceBody, UpdateVoiceApiRequest, VoiceConfigApi, VoiceDetail,
 };

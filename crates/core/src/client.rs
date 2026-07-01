@@ -4,32 +4,30 @@
 //! mirror enscrive-cli/src/client.rs to keep cross-CLI behavior consistent.
 
 use crate::error::{EnscriveError, Result};
+use crate::jobs_polling::{await_job_terminal, PollConfig};
 use crate::types::{
     CorpusDetail, CreateCorpusRequest, CreateVoiceApiRequest, DeleteCorpusResponse,
-    DeleteVoiceResponse, IngestProgressEvent, IngestRequest, SearchQuery, SearchResults,
-    SearchWithVoiceBody, UpdateVoiceApiRequest, VoiceDetail,
+    DeleteVoiceResponse, ImportJobStatus, IngestRequest, IngestSummary, JobLaunchResponse,
+    SearchQuery, SearchResults, SearchWithVoiceBody, UpdateVoiceApiRequest, VoiceDetail,
 };
-use futures_util::StreamExt;
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::time::Duration;
-use tokio::sync::mpsc;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
+
+/// Default wall-clock budget for polling a background ingest job to
+/// terminal (30 minutes) — matches the CLI's convention for job-shaped
+/// mutations (`enscrive-cli`'s `PollConfig::waited` call sites for corpus
+/// populate / restore).
+const DEFAULT_INGEST_POLL_TIMEOUT_SECS: u64 = 1800;
 
 pub struct EnscriveClient {
     http: Client,
     base_url: String,
     api_key: String,
     embedding_provider_key: Option<String>,
-}
-
-/// Streamed ingest progress, surfaced from the SSE response of POST /v1/ingest.
-#[derive(Debug, Clone)]
-pub enum IngestProgress {
-    Event(IngestProgressEvent),
-    Done,
 }
 
 impl EnscriveClient {
@@ -170,70 +168,40 @@ impl EnscriveClient {
 
     // -- Ingest --
 
-    /// Buffered (non-streaming) ingest. Returns all progress events as a vec.
-    pub async fn ingest(&self, request: &IngestRequest) -> Result<Vec<IngestProgressEvent>> {
-        let response = self
-            .auth(self.http.post(self.url("/v1/ingest")))
-            .json(request)
-            .send()
+    /// `POST /v1/ingest` under the async-by-default `/v1` contract
+    /// (ENS-628, `enscrive-developer/crates/server/src/api/v1/ingest.rs`):
+    /// the server ALWAYS answers `202 Accepted` + `JobLaunchResponse` for
+    /// every payload — there is no synchronous or SSE response shape any
+    /// more, for any input. This client polls `GET /v1/jobs/{job_id}` with
+    /// the CLI's exponential backoff (2s → 15s, [`crate::jobs_polling`])
+    /// until the job reaches a terminal status, and surfaces a job failure
+    /// or poll timeout as an `Err` rather than swallowing it — a silent
+    /// failure here previously left the docs bootstrap ingest looking like
+    /// a no-op.
+    pub async fn ingest(&self, request: &IngestRequest) -> Result<IngestSummary> {
+        let launch: JobLaunchResponse = self
+            .send_typed(Method::POST, "/v1/ingest", Some(request))
             .await?;
-        let status = response.status();
-        let text = response.text().await?;
-        if !status.is_success() {
-            return Err(EnscriveError::Http { status, body: text });
-        }
-        serde_json::from_str(&text).map_err(EnscriveError::from)
+        let (_kind, job) = await_job_terminal(
+            self,
+            &launch.job_id,
+            PollConfig::waited(DEFAULT_INGEST_POLL_TIMEOUT_SECS),
+        )
+        .await?;
+        Ok(IngestSummary {
+            job_id: launch.job_id,
+            status: job.status,
+            documents_ingested: job.documents_ingested,
+            documents_failed: job.documents_failed,
+            error_message: job.error_message,
+            warnings: job.warnings,
+        })
     }
 
-    /// Streaming ingest via SSE. Returns a receiver that yields events as
-    /// they arrive from the server.
-    pub async fn ingest_stream(
-        &self,
-        request: &IngestRequest,
-    ) -> Result<mpsc::Receiver<IngestProgress>> {
-        let response = self
-            .auth(self.http.post(self.url("/v1/ingest")))
-            .header("Accept", "text/event-stream")
-            .json(request)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(EnscriveError::Http { status, body });
-        }
-
-        let (tx, rx) = mpsc::channel::<IngestProgress>(64);
-        tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
-            let mut buffer = String::new();
-            while let Some(chunk) = stream.next().await {
-                let chunk = match chunk {
-                    Ok(b) => b,
-                    Err(_) => break,
-                };
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-                while let Some(idx) = buffer.find("\n\n") {
-                    let frame = buffer[..idx].to_string();
-                    buffer.drain(..idx + 2);
-                    for line in frame.lines() {
-                        if let Some(payload) = line.strip_prefix("data:") {
-                            let payload = payload.trim();
-                            if payload.is_empty() {
-                                continue;
-                            }
-                            if let Ok(event) =
-                                serde_json::from_str::<IngestProgressEvent>(payload)
-                            {
-                                let _ = tx.send(IngestProgress::Event(event)).await;
-                            }
-                        }
-                    }
-                }
-            }
-            let _ = tx.send(IngestProgress::Done).await;
-        });
-        Ok(rx)
+    /// `GET /v1/jobs/{job_id}` — poll a single job's current status.
+    pub async fn get_job_status(&self, job_id: &str) -> Result<ImportJobStatus> {
+        self.send_typed::<ImportJobStatus>(Method::GET, &format!("/v1/jobs/{job_id}"), NONE)
+            .await
     }
 
     // -- Search --
@@ -262,3 +230,12 @@ impl EnscriveClient {
 }
 
 const NONE: Option<&serde_json::Value> = None;
+
+impl crate::jobs_polling::JobPoller for EnscriveClient {
+    fn get_job_status(
+        &self,
+        job_id: &str,
+    ) -> impl std::future::Future<Output = Result<ImportJobStatus>> + Send {
+        EnscriveClient::get_job_status(self, job_id)
+    }
+}

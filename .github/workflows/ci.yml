@@ -20,6 +20,46 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  secret-scan:
+    name: secret-scan
+    runs-on: ubuntu-latest
+    # Fleet secret-scan rollout (2026-07-02 audit, cross-cutting risk 02):
+    # enscrive-embed's secret-scan job used gitleaks/gitleaks-action, which
+    # now requires a paid GITLEAKS_LICENSE secret for organization repos and
+    # was failing outright without one. This repo had no secret-scan job at
+    # all. Run the gitleaks OSS CLI directly (MIT-licensed, checksum-
+    # verified, no license dependency), scoped to only the commits a PR
+    # introduces (base..head) so it doesn't trip on pre-existing history.
+    # No continue-on-error: a scanner that can't run must fail the PR, not
+    # pass it silently.
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: gitleaks
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            LOG_OPTS="--no-merges --first-parent ${{ github.event.pull_request.base.sha }}^..${{ github.event.pull_request.head.sha }}"
+          else
+            LOG_OPTS="-1"
+          fi
+          gitleaks detect \
+            --source "$GITHUB_WORKSPACE" \
+            --redact --no-banner --exit-code 1 \
+            --log-opts="${LOG_OPTS}"
+
   build:
     name: build
     runs-on: ubuntu-latest

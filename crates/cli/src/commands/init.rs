@@ -30,22 +30,18 @@ pub async fn run(global: GlobalArgs, args: InitArgs) -> Result<(), String> {
     let detected_profile = if args.no_profile_detect {
         None
     } else {
-        global
-            .profile
-            .clone()
-            .or_else(detected_default_profile)
+        global.profile.clone().or_else(detected_default_profile)
     };
 
     let scaffold = scaffold_toml(&args.theme, detected_profile.as_deref());
 
-    if let Some(parent) = target.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("create {}: {e}", parent.display()))?;
-        }
+    if let Some(parent) = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty() && !p.exists())
+    {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    std::fs::write(&target, scaffold)
-        .map_err(|e| format!("write {}: {e}", target.display()))?;
+    std::fs::write(&target, scaffold).map_err(|e| format!("write {}: {e}", target.display()))?;
 
     println!("scaffolded {}", target.display());
     if let Some(profile) = detected_profile {
@@ -70,18 +66,16 @@ fn detected_default_profile() -> Option<String> {
     }
     let raw = std::fs::read_to_string(path).ok()?;
     let value: toml::Value = toml::from_str(&raw).ok()?;
-    value
-        .get("profiles")?
-        .as_table()?
-        .keys()
-        .next()
-        .cloned()
+    value.get("profiles")?.as_table()?.keys().next().cloned()
 }
 
 fn scaffold_toml(theme_variant: &str, profile: Option<&str>) -> String {
     let profile_line = match profile {
         Some(name) => format!("profile = \"{name}\""),
-        None => "# profile = \"default\"  # uncomment after creating ~/.config/enscrive/profiles.toml".to_string(),
+        None => {
+            "# profile = \"default\"  # uncomment after creating ~/.config/enscrive/profiles.toml"
+                .to_string()
+        }
     };
     format!(
         r##"# enscrive-docs.toml

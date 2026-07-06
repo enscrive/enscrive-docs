@@ -63,15 +63,16 @@ pub async fn run(global: GlobalArgs, args: SearchArgs) -> Result<(), String> {
         .corpus
         .clone()
         .or_else(|| cfg.corpora.first().map(|c| c.name.clone()));
-    let corpus_id = corpus_name
-        .as_deref()
-        .and_then(|name| corpora.iter().find(|c| c.name == name).map(|c| c.id.clone()));
-    if let Some(name) = corpus_name.as_deref() {
-        if corpus_id.is_none() {
-            return Err(format!(
-                "corpus \"{name}\" is not present in the Enscrive tenant; create it before searching"
-            ));
-        }
+    let corpus_id = corpus_name.as_deref().and_then(|name| {
+        corpora
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.id.clone())
+    });
+    if let (Some(name), None) = (corpus_name.as_deref(), corpus_id.as_deref()) {
+        return Err(format!(
+            "corpus \"{name}\" is not present in the Enscrive tenant; create it before searching"
+        ));
     }
 
     let voice_name = args

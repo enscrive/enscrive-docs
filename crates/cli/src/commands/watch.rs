@@ -1,9 +1,9 @@
-use crate::commands::serve::{rebuild_pages, serve_with_state, setup_state, ServeArgs};
+use crate::commands::serve::{ServeArgs, rebuild_pages, serve_with_state, setup_state};
 use crate::global::GlobalArgs;
 use clap::Args;
 use notify::{
-    event::{ModifyKind, RemoveKind},
     Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+    event::{ModifyKind, RemoveKind},
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -30,7 +30,12 @@ pub struct WatchArgs {
 }
 
 pub async fn run(global: GlobalArgs, args: WatchArgs) -> Result<(), String> {
-    let state = setup_state(&global, args.base_path.as_deref(), /* watch_mode */ true).await?;
+    let state = setup_state(
+        &global,
+        args.base_path.as_deref(),
+        /* watch_mode */ true,
+    )
+    .await?;
 
     // Collect every corpus's source root so the watcher can pick up
     // changes anywhere in the configured tree.
@@ -53,8 +58,8 @@ pub async fn run(global: GlobalArgs, args: WatchArgs) -> Result<(), String> {
     // dedicated blocking thread that translates raw events into a
     // single-shot tokio channel for the async event-loop below.
     let (raw_tx, raw_rx) = mpsc::channel::<notify::Result<Event>>();
-    let mut watcher: RecommendedWatcher = notify::recommended_watcher(raw_tx)
-        .map_err(|e| format!("init watcher: {e}"))?;
+    let mut watcher: RecommendedWatcher =
+        notify::recommended_watcher(raw_tx).map_err(|e| format!("init watcher: {e}"))?;
     for root in &roots {
         watcher
             .watch(root, RecursiveMode::Recursive)
@@ -98,12 +103,7 @@ pub async fn run(global: GlobalArgs, args: WatchArgs) -> Result<(), String> {
             }
             // Drain anything that arrived in the debounce window.
             let deadline = tokio::time::Instant::now() + debounce;
-            loop {
-                match tokio::time::timeout_at(deadline, change_rx.recv()).await {
-                    Ok(Some(_)) => continue,
-                    _ => break,
-                }
-            }
+            while let Ok(Some(_)) = tokio::time::timeout_at(deadline, change_rx.recv()).await {}
             match rebuild_pages(&state_for_reload) {
                 Ok(()) => {
                     let count = state_for_reload.pages.load().len();

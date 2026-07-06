@@ -12,20 +12,20 @@ fn main() {
 }
 
 fn git_sha() -> String {
-    if let Ok(out) = Command::new("git")
+    if let Some(out) = Command::new("git")
         .args(["rev-parse", "--short=7", "HEAD"])
         .output()
+        .ok()
+        .filter(|out| out.status.success())
     {
-        if out.status.success() {
-            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !sha.is_empty() {
-                let dirty = Command::new("git")
-                    .args(["status", "--porcelain"])
-                    .output()
-                    .map(|o| !o.stdout.is_empty())
-                    .unwrap_or(false);
-                return if dirty { format!("{sha}-dirty") } else { sha };
-            }
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !sha.is_empty() {
+            let dirty = Command::new("git")
+                .args(["status", "--porcelain"])
+                .output()
+                .map(|o| !o.stdout.is_empty())
+                .unwrap_or(false);
+            return if dirty { format!("{sha}-dirty") } else { sha };
         }
     }
     // CI fallback: no .git but GITHUB_SHA is set

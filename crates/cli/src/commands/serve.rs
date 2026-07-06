@@ -1,24 +1,24 @@
 use crate::global::GlobalArgs;
 use arc_swap::ArcSwap;
 use axum::{
+    Json, Router,
     body::Body,
     extract::{Path as AxPath, Query, State},
-    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     response::{
-        sse::{Event, KeepAlive, Sse},
         Html, IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
     },
     routing::get,
-    Json, Router,
 };
 use clap::Args;
 use enscrive_docs_core::{
-    CorpusDetail, Config, EnscriveClient, SearchFilter, SearchQuery as ApiSearchQuery,
+    Config, CorpusDetail, EnscriveClient, SearchFilter, SearchQuery as ApiSearchQuery,
     SearchWithVoiceBody, VoiceDetail,
 };
 use enscrive_docs_render::{
-    embedded_asset, render_index, render_markdown, render_page, templates::build_nav, IndexContext,
-    Page, PageContext, PageMeta, ReturnLink, ThemeVariant,
+    IndexContext, Page, PageContext, PageMeta, ReturnLink, ThemeVariant, embedded_asset,
+    render_index, render_markdown, render_page, templates::build_nav,
 };
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -92,7 +92,12 @@ pub struct EnscriveServer {
 
 pub async fn run(global: GlobalArgs, args: ServeArgs) -> Result<(), String> {
     init_tracing();
-    let state = setup_state(&global, args.base_path.as_deref(), /* watch_mode */ false).await?;
+    let state = setup_state(
+        &global,
+        args.base_path.as_deref(),
+        /* watch_mode */ false,
+    )
+    .await?;
     serve_with_state(state, &args).await
 }
 
@@ -260,10 +265,7 @@ async fn try_load_tenant(
 /// Bind a TCP listener and serve the router until shutdown. Shared by
 /// `serve` and `watch`.
 pub async fn serve_with_state(state: AppState, args: &ServeArgs) -> Result<(), String> {
-    let port = args
-        .port
-        .or(state.cfg.serve.port)
-        .unwrap_or(DEFAULT_PORT);
+    let port = args.port.or(state.cfg.serve.port).unwrap_or(DEFAULT_PORT);
     let base_path = state.base_path.clone();
     let app = build_router(state.clone(), &base_path);
     let bind_addr: SocketAddr = format!("{}:{}", args.bind, port)
@@ -432,10 +434,7 @@ struct SearchResponse {
     total_candidates: u32,
 }
 
-async fn handle_search(
-    State(state): State<AppState>,
-    Query(p): Query<SearchParams>,
-) -> Response {
+async fn handle_search(State(state): State<AppState>, Query(p): Query<SearchParams>) -> Response {
     let query = match p.q.as_deref().filter(|v| !v.trim().is_empty()) {
         Some(q) => q.trim().to_string(),
         None => {
@@ -445,7 +444,7 @@ async fn handle_search(
                 search_time_ms: 0,
                 total_candidates: 0,
             })
-            .into_response()
+            .into_response();
         }
     };
 
@@ -534,8 +533,7 @@ async fn handle_search(
                         }
                     });
                     let title = page.map(|p| p.meta.title.clone());
-                    let snippet =
-                        r.content.chars().take(280).collect::<String>();
+                    let snippet = r.content.chars().take(280).collect::<String>();
                     SearchResponseItem {
                         document_id: r.document_id,
                         score: r.score,
@@ -575,7 +573,11 @@ async fn handle_llms_txt(State(state): State<AppState>) -> Response {
     let pages_meta = state.pages_meta.load();
     let nav = build_nav(&pages_meta, &state.base_path, None);
     for item in nav {
-        out.push_str(&format!("- [{title}]({url})\n", title = item.title, url = item.url));
+        out.push_str(&format!(
+            "- [{title}]({url})\n",
+            title = item.title,
+            url = item.url
+        ));
     }
     (
         StatusCode::OK,
@@ -622,7 +624,10 @@ async fn handle_events(
         }
     };
     let stream = BroadcastStream::new(rx).map(
-        |res: std::result::Result<&'static str, tokio_stream::wrappers::errors::BroadcastStreamRecvError>| {
+        |res: std::result::Result<
+            &'static str,
+            tokio_stream::wrappers::errors::BroadcastStreamRecvError,
+        >| {
             let kind = res.unwrap_or("reload");
             Ok(Event::default().event(kind).data(""))
         },
@@ -651,9 +656,8 @@ async fn handle_asset(AxPath(path): AxPath<String>) -> Response {
             let mut headers = HeaderMap::new();
             headers.insert(
                 header::CONTENT_TYPE,
-                HeaderValue::from_str(&mime).unwrap_or(HeaderValue::from_static(
-                    "application/octet-stream",
-                )),
+                HeaderValue::from_str(&mime)
+                    .unwrap_or(HeaderValue::from_static("application/octet-stream")),
             );
             headers.insert(
                 header::CACHE_CONTROL,
@@ -666,7 +670,11 @@ async fn handle_asset(AxPath(path): AxPath<String>) -> Response {
 }
 
 fn not_found(_slug: &str) -> Response {
-    (StatusCode::NOT_FOUND, Html("<h1>404</h1><p>Page not found.</p>")).into_response()
+    (
+        StatusCode::NOT_FOUND,
+        Html("<h1>404</h1><p>Page not found.</p>"),
+    )
+        .into_response()
 }
 
 // -- Setup helpers --
@@ -711,17 +719,15 @@ fn load_custom_css(config_dir: &Path, custom_css: Option<&Path>) -> String {
     std::fs::read_to_string(&path).unwrap_or_default()
 }
 
-fn build_pages(
-    config_dir: &Path,
-    cfg: &Config,
-) -> Result<
-    (
-        HashMap<String, Page>,
-        Vec<PageMeta>,
-        HashMap<String, String>,
-    ),
-    String,
-> {
+/// Output of [`build_pages`]: pages by slug, ordered page metadata,
+/// and a doc-id → slug map.
+type BuiltPages = (
+    HashMap<String, Page>,
+    Vec<PageMeta>,
+    HashMap<String, String>,
+);
+
+fn build_pages(config_dir: &Path, cfg: &Config) -> Result<BuiltPages, String> {
     let mut pages: HashMap<String, Page> = HashMap::new();
     let mut metas: Vec<PageMeta> = Vec::new();
     let mut doc_id_to_slug: HashMap<String, String> = HashMap::new();
@@ -749,9 +755,7 @@ fn build_pages(
             if !entry.file_type().is_file() {
                 continue;
             }
-            if entry.path().extension().and_then(|e| e.to_str())
-                != Some("md")
-            {
+            if entry.path().extension().and_then(|e| e.to_str()) != Some("md") {
                 continue;
             }
             let path = entry.path();
@@ -861,8 +865,7 @@ fn build_text_fragment(content: &str) -> Option<String> {
 
     for raw_line in content.lines() {
         let cleaned = strip_inline_marks(strip_line_prefix(raw_line));
-        let normalized: String =
-            cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
         if normalized.len() < 20 {
             continue;
         }
@@ -905,6 +908,28 @@ fn percent_encode_fragment(s: &str) -> String {
     out
 }
 
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl+C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    println!("\nshutting down");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,17 +937,15 @@ mod tests {
     #[test]
     fn fragment_strips_heading_marker() {
         // First line is too short (<20 chars); helper falls through to body.
-        let f = build_text_fragment(
-            "# enscrive-docs\n\nThis is the body that should be picked up.",
-        )
-        .unwrap();
+        let f =
+            build_text_fragment("# enscrive-docs\n\nThis is the body that should be picked up.")
+                .unwrap();
         assert!(f.starts_with("This"), "got: {f}");
     }
 
     #[test]
     fn fragment_picks_up_long_heading() {
-        let f = build_text_fragment("## Configuring voices and corpora")
-            .unwrap();
+        let f = build_text_fragment("## Configuring voices and corpora").unwrap();
         assert!(f.starts_with("Configuring"), "got: {f}");
     }
 
@@ -937,8 +960,7 @@ mod tests {
 
     #[test]
     fn fragment_strips_blockquote_and_inline_marks() {
-        let f = build_text_fragment("> Turn any **markdown** directory into a `tool`")
-            .unwrap();
+        let f = build_text_fragment("> Turn any **markdown** directory into a `tool`").unwrap();
         let decoded = f.replace("%20", " ");
         assert!(
             decoded.starts_with("Turn any markdown directory into a tool"),
@@ -967,26 +989,4 @@ mod tests {
         assert_eq!(percent_encode_fragment("a&b#c"), "a%26b%23c");
         assert_eq!(percent_encode_fragment("safe-chars_.~"), "safe-chars_.~");
     }
-}
-
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("install Ctrl+C handler");
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler")
-            .recv()
-            .await;
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
-    println!("\nshutting down");
 }

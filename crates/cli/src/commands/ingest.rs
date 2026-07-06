@@ -1,7 +1,7 @@
 use crate::global::GlobalArgs;
 use clap::Args;
 use enscrive_docs_core::{
-    CorpusConfig, Config, EnscriveClient, IngestDocument, IngestRequest, VoiceConfig,
+    Config, CorpusConfig, EnscriveClient, IngestDocument, IngestRequest, VoiceConfig,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -47,8 +47,7 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
             .resolved_api_key(global.api_key.as_deref())
             .map_err(|e| e.to_string())?;
         let endpoint = cfg.resolved_endpoint(global.endpoint.as_deref());
-        let provider_key =
-            cfg.resolved_provider_key(global.embedding_provider_key.as_deref());
+        let provider_key = cfg.resolved_provider_key(global.embedding_provider_key.as_deref());
         let client = EnscriveClient::with_provider_key(endpoint, api_key, provider_key);
         let corpora = client.list_corpora().await.map_err(|e| e.to_string())?;
         let voices = client.list_voices().await.map_err(|e| e.to_string())?;
@@ -58,10 +57,12 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
     let mut total_docs = 0usize;
     let mut total_corpora = 0usize;
     for entry in &cfg.corpora {
-        if let Some(only) = args.corpus.as_deref() {
-            if entry.name != only {
-                continue;
-            }
+        if args
+            .corpus
+            .as_deref()
+            .is_some_and(|only| entry.name != only)
+        {
+            continue;
         }
         let voice_cfg = cfg
             .voices
@@ -104,9 +105,8 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
             continue;
         }
 
-        let (client, corpora, voices) = remote
-            .as_ref()
-            .expect("remote must exist when not dry-run");
+        let (client, corpora, voices) =
+            remote.as_ref().expect("remote must exist when not dry-run");
         let corpus_id = corpora
             .iter()
             .find(|c| c.name == entry.name)
@@ -171,9 +171,7 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
         }
     }
 
-    println!(
-        "\ndone: {total_docs} document(s) across {total_corpora} corpus(a)"
-    );
+    println!("\ndone: {total_docs} document(s) across {total_corpora} corpus(a)");
     Ok(())
 }
 
@@ -214,8 +212,8 @@ fn build_documents(
         }
 
         let path = entry.path();
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
         let id = relative_doc_id(&root, path);
         let mut metadata = HashMap::new();
         metadata.insert("source_path".to_string(), id.clone());

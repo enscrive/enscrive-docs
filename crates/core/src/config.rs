@@ -202,16 +202,14 @@ impl Config {
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let raw = std::fs::read_to_string(path).map_err(|e| {
-            EnscriveError::Config(format!("read {}: {e}", path.display()))
-        })?;
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| EnscriveError::Config(format!("read {}: {e}", path.display())))?;
         toml::from_str::<Config>(&raw).map_err(EnscriveError::from)
     }
 
     pub fn write_to(&self, path: impl AsRef<Path>) -> Result<()> {
-        let serialized = toml::to_string_pretty(self).map_err(|e| {
-            EnscriveError::Config(format!("serialize config: {e}"))
-        })?;
+        let serialized = toml::to_string_pretty(self)
+            .map_err(|e| EnscriveError::Config(format!("serialize config: {e}")))?;
         std::fs::write(path.as_ref(), serialized).map_err(EnscriveError::from)
     }
 
@@ -237,16 +235,18 @@ impl Config {
         if let Some(key) = override_value {
             return Ok(key.to_string());
         }
-        if let Ok(key) = std::env::var("ENSCRIVE_API_KEY") {
-            if !key.is_empty() {
-                return Ok(key);
-            }
+        if let Some(key) = std::env::var("ENSCRIVE_API_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+        {
+            return Ok(key);
         }
         if let Some(key) = self.enscrive.api_key.as_ref().filter(|k| !k.is_empty()) {
             return Ok(key.clone());
         }
         if let Some(profile) = self.enscrive.profile.as_deref() {
-            if let Some(key) = read_profile_api_key(profile)? {
+            let profile_key = read_profile_api_key(profile)?;
+            if let Some(key) = profile_key {
                 return Ok(key);
             }
         }

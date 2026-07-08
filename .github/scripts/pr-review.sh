@@ -22,9 +22,26 @@
 set -euo pipefail
 
 # --- Pure, unit-testable verdict helpers (exercised by pr-review-verdict-test.sh).
-# These carry the ENS-569 "empty-block" guard: a request_changes verdict that
-# names ZERO concrete blocking issues on a fully-seen diff is a false positive
-# (positive prose, empty "Blocking issues:") and must NOT block the pipeline.
+# These make the pipeline's ultimate ACTION a function of concrete signal --
+# named blocking issues, diff truncation -- never of the model's own raw
+# "decision" label or confidence score alone.
+#
+# ENS-569 (original): a request_changes verdict that names ZERO concrete
+# blocking issues on a fully-seen diff is a false positive (positive prose,
+# empty "Blocking issues:") and must not block the pipeline.
+#
+# ENS-854 (this pass): the SAME empty "Blocking issues:" CHANGES_REQUESTED
+# symptom was also reachable via a different path the original guard didn't
+# cover -- the model returns decision:"approve" with 0 blockers, but at
+# confidence below APPROVE_THRESHOLD; the confidence gate alone then routed
+# it to the "not approved -> request changes" branch, rendering an empty
+# blocking-issues body identical in shape to the ENS-569 case. Ground-truthed
+# against 6 real flap runs (2026-07-08: enscrive-developer #190/#191/#192,
+# enscrive-embed #55, enscrive-deploy's ens-808-ld0-replay run twice) -- every
+# one carried decision:"approve", blocking_issues:[], confidence 0.72-0.78
+# (all below the 0.80 default threshold). Fixed by making 0 named blockers
+# (on a fully-seen diff) ALWAYS resolve to an approval, regardless of which
+# raw decision label or confidence score arrived with it.
 
 # count_blocking_issues <decision.json path>
 # Counts blocking_issues entries that carry real content. A non-string entry
@@ -34,19 +51,37 @@ count_blocking_issues() {
   jq -r '[(.blocking_issues // [])[] | select(if type=="string" then test("\\S") else true end)] | length' "$1"
 }
 
-# effective_decision <model_decision> <block_count> <truncated>
-# Maps the model's raw verdict to the verdict the pipeline ACTS on.
-#   request_changes + 0 blockers + full diff  -> approve:coerced  (false positive)
-#   request_changes + >=1 blocker             -> request_changes:model  (real block)
-#   request_changes + 0 blockers + TRUNCATED  -> request_changes:model  (unseen diff)
-#   approve                                    -> approve:model
-# Deterministic: identical inputs always yield the identical verdict (no flap).
+# effective_decision <model_decision> <block_count> <truncated> <pass_conf>
+# Maps the model's raw verdict to the verdict the pipeline ACTS on. Named
+# blocking issues and diff truncation are the ONLY inputs that can produce a
+# real hold -- the "decision" label and confidence score can never do so on
+# their own, and can never SUPPRESS a hold a named blocker actually describes
+# (a self-contradictory decision:"approve" with a non-empty blocking_issues
+# array is now a real hold too, not a silent pass-through).
+#
+#   truncated (diff not fully seen)        -> request_changes:truncated (ALWAYS)
+#   >=1 concrete blocker                   -> request_changes:real      (ALWAYS,
+#                                              whatever the label/confidence)
+#   0 blockers, not truncated,
+#     decision=="approve" AND confidence clears APPROVE_THRESHOLD
+#                                           -> approve:model  (the normal path)
+#   0 blockers, not truncated, otherwise
+#     (request_changes naming nothing, OR approve below threshold)
+#                                           -> approve:coerced (not a real
+#                                              hold either way)
+#
+# Deterministic: identical inputs always yield the identical verdict (no
+# approve<->changes flap on re-run).
 effective_decision() {
-  local decision="$1" blocks="$2" truncated="$3"
-  if [ "$decision" = "request_changes" ] && [ "$blocks" -eq 0 ] && [ "$truncated" != "1" ]; then
-    echo "approve:coerced"
+  local decision="$1" blocks="$2" truncated="$3" pass_conf="${4:-1}"
+  if [ "$truncated" = "1" ]; then
+    echo "request_changes:truncated"
+  elif [ "$blocks" -ge 1 ]; then
+    echo "request_changes:real"
+  elif [ "$decision" = "approve" ] && [ "$pass_conf" = "1" ]; then
+    echo "approve:model"
   else
-    echo "${decision}:model"
+    echo "approve:coerced"
   fi
 }
 
@@ -192,48 +227,34 @@ ISSUES=$(jq -r '(.blocking_issues // []) | map("- " + .) | join("\n")' /tmp/deci
 HRNOTES=$(jq -r '.high_risk_notes // ""' /tmp/decision.json)
 PASS_CONF=$(awk -v c="$CONF" -v t="$THRESHOLD" 'BEGIN{print (c+0>=t+0)?"1":"0"}')
 
-# ENS-569 empty-block guard. The reviewer sometimes returns request_changes with
-# an EMPTY blocking_issues array and positive prose ("cleanly adds", "well
-# tested") — an honest APPROVE mis-labeled as a hold (seen fleet-wide, e.g.
-# enscrive-metering-sentinel PR #24, 2026-07-02: review body ended "Blocking
-# issues:" with nothing after it, confidence 0.78, CI green). Left as-is it
-# blocks auto-merge and manufactures a manual-arbitration backlog. A
-# request_changes that cannot name a single concrete
-# blocking issue is not a real hold, so we coerce it to approve. request_changes
-# WITH blockers still blocks; a truncated (unseen) diff still blocks.
-# Deterministic, so re-runs cannot flap.
+# ENS-569 / ENS-854 verdict guard: route on concrete signal (named blocking
+# issues, diff truncation), never on the model's raw "decision" label or
+# confidence score alone. See effective_decision()'s doc comment above for
+# the full rationale, including the ENS-854 finding (a confidence-gated
+# "approve" with zero named blockers produced the identical empty-body
+# CHANGES_REQUESTED symptom as the original ENS-569 case, via the confidence
+# gate rather than the decision label).
 BLOCK_COUNT=$(count_blocking_issues /tmp/decision.json)
-COERCED=0
-if [ "$(effective_decision "$DECISION" "$BLOCK_COUNT" "$TRUNCATED")" = "approve:coerced" ]; then
-  COERCED=1
-  DECISION="approve"
-  echo "ENS-569 empty-block guard: model said request_changes with 0 concrete blocking issues on a fully-seen diff -> coercing to APPROVE."
-fi
+VERDICT=$(effective_decision "$DECISION" "$BLOCK_COUNT" "$TRUNCATED" "$PASS_CONF")
+echo "Effective verdict: $VERDICT (raw decision=$DECISION confidence=$CONF blockers=$BLOCK_COUNT truncated=$TRUNCATED)"
 
-# Root-of-trust changes are NEVER auto-merged, whatever the model verdict. Post
-# the review as guidance, label needs-founder, and stop (no approval) so branch
-# protection holds the PR for a human merge. The check stays green: this is a
-# deliberate hold, not a failure.
-if [ "$FOUNDER_GATED" = "1" ]; then
-  echo "FOUNDER-GATED path touched -> escalate to founder (no auto-merge)"
-  gh label create needs-founder --color B60205 \
-    --description "Touches root-of-trust: reviewer harness / workflows / release trust pipeline" 2>/dev/null || true
-  gh pr edit "$PR" --add-label needs-founder || true
-  EXTRA=""
-  [ -n "$ISSUES" ] && EXTRA=$(printf '\n\nReviewer notes:\n%s' "$ISSUES")
-  BODY_MD=$(printf '[auto-review] (ENS-569): **FOUNDER MERGE REQUIRED** — this PR touches the root-of-trust (the reviewer harness, a workflow, or the release trust pipeline), which is never auto-merged. Reviewer assessment (model %s, confidence %s — this is NOT an approval):\n\n%s%s' "$MODEL" "$CONF" "$SUMMARY" "$EXTRA")
-  gh pr comment "$PR" --body "$BODY_MD"
-  exit 0
-fi
-
-# A coerced approve carries no blocking issues, so it bypasses the confidence
-# gate (the model's low confidence rode along with a hold it could not justify);
-# a genuine model approve still must clear the confidence threshold. Both still
-# require a fully-seen (non-truncated) diff.
-if [ "$DECISION" = "approve" ] && { [ "$PASS_CONF" = "1" ] || [ "$COERCED" = "1" ]; } && [ "$TRUNCATED" != "1" ]; then
-  echo "APPROVE + auto-merge (confidence $CONF, coerced=$COERCED)"
-  if [ "$COERCED" = "1" ]; then
-    BODY_MD=$(printf '[auto-review] (ENS-569): **APPROVED** (empty-block guard: the reviewer returned request_changes but named no concrete blocking issue, so this is treated as an approval).\n\n%s' "$SUMMARY")
+if [ "$VERDICT" = "approve:model" ] || [ "$VERDICT" = "approve:coerced" ]; then
+  echo "APPROVE + auto-merge (verdict $VERDICT, confidence $CONF)"
+  if [ "$VERDICT" = "approve:coerced" ]; then
+    # ENS-854: name which path was coerced, for the visible note.
+    if [ "$DECISION" = "request_changes" ]; then
+      REASON="the reviewer returned request_changes but named no concrete blocking issue"
+    else
+      REASON="the reviewer approved (confidence $CONF, below the $THRESHOLD threshold) but named no concrete blocking issue"
+    fi
+    echo "ENS-854/ENS-569 flap guard fired: $REASON -> coercing to APPROVE."
+    # Visible marker (ENS-854 ask): a label survives independent of the PR
+    # body, so flap frequency stays measurable fleet-wide without scraping
+    # review text (a future ct reviewer-health trigger can just count these).
+    gh label create reviewer-flap-guarded --color 0E8A16 \
+      --description "ENS-854: reviewer verdict/confidence guard coerced an unblockable hold to approve" 2>/dev/null || true
+    gh pr edit "$PR" --add-label reviewer-flap-guarded || true
+    BODY_MD=$(printf '[auto-review] (ENS-569/ENS-854): **APPROVED** (flap guard: %s, so this is treated as an approval).\n\n%s' "$REASON" "$SUMMARY")
   else
     BODY_MD=$(printf '[auto-review] (ENS-569): **APPROVED** - confidence %s.\n\n%s' "$CONF" "$SUMMARY")
   fi
@@ -241,6 +262,14 @@ if [ "$DECISION" = "approve" ] && { [ "$PASS_CONF" = "1" ] || [ "$COERCED" = "1"
   gh pr review "$PR" --approve --body "$BODY_MD"
   gh pr merge "$PR" --auto --squash
   exit 0
+fi
+
+# VERDICT is request_changes:real or request_changes:truncated -> a genuine
+# hold. A truncated diff can reach here with zero model-named blockers (the
+# model itself couldn't certify a diff it never fully saw); give it a
+# concrete reason rather than ever rendering an empty "Blocking issues:".
+if [ "$VERDICT" = "request_changes:truncated" ] && [ "$BLOCK_COUNT" -eq 0 ]; then
+  ISSUES="- Diff exceeds DIFF_CHAR_CAP ($CAP chars); the reviewer could not see the full change and cannot certify the absence of blocking issues. Split the PR or raise DIFF_CHAR_CAP."
 fi
 
 # Not approved -> request changes, with a hard flapping ceiling.

@@ -238,6 +238,26 @@ BLOCK_COUNT=$(count_blocking_issues /tmp/decision.json)
 VERDICT=$(effective_decision "$DECISION" "$BLOCK_COUNT" "$TRUNCATED" "$PASS_CONF")
 echo "Effective verdict: $VERDICT (raw decision=$DECISION confidence=$CONF blockers=$BLOCK_COUNT truncated=$TRUNCATED)"
 
+# Root-of-trust changes are NEVER auto-merged, whatever the effective verdict
+# above (restored here after an ENS-854 patching error briefly dropped this
+# gate -- see PR discussion). Post the review as guidance, label
+# needs-founder, and stop (no approval) so branch protection holds the PR
+# for a human merge. The check stays green: this is a deliberate hold, not a
+# failure. This composes WITH the ENS-569/ENS-854 verdict guard above, not in
+# place of it: even an approve:coerced verdict on a root-of-trust file still
+# stops here, unmerged.
+if [ "$FOUNDER_GATED" = "1" ]; then
+  echo "FOUNDER-GATED path touched -> escalate to founder (no auto-merge)"
+  gh label create needs-founder --color B60205 \
+    --description "Touches root-of-trust: reviewer harness / workflows / release trust pipeline" 2>/dev/null || true
+  gh pr edit "$PR" --add-label needs-founder || true
+  EXTRA=""
+  [ -n "$ISSUES" ] && EXTRA=$(printf '\n\nReviewer notes:\n%s' "$ISSUES")
+  BODY_MD=$(printf '[auto-review] (ENS-569): **FOUNDER MERGE REQUIRED** — this PR touches the root-of-trust (the reviewer harness, a workflow, or the release trust pipeline), which is never auto-merged. Reviewer assessment (model %s, confidence %s — this is NOT an approval):\n\n%s%s' "$MODEL" "$CONF" "$SUMMARY" "$EXTRA")
+  gh pr comment "$PR" --body "$BODY_MD"
+  exit 0
+fi
+
 if [ "$VERDICT" = "approve:model" ] || [ "$VERDICT" = "approve:coerced" ]; then
   echo "APPROVE + auto-merge (verdict $VERDICT, confidence $CONF)"
   if [ "$VERDICT" = "approve:coerced" ]; then

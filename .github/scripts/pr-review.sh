@@ -112,23 +112,13 @@ if [ "${#DIFF}" -gt "$CAP" ]; then
   TRUNCATED=1
 fi
 
-# FOUNDER-GATED paths: the root-of-trust. The reviewer NEVER auto-merges changes
-# to its own harness, to any workflow (the gating layer itself), or to the
-# release trust pipeline (cosign verify / provision / channel routing). These
-# escalate to a human (needs-founder) instead of auto-merging. ENS-569 Gap-4
-# refinement: the thing that judges every other PR must not merge its own
-# changes on its own approval.
-FOUNDER_GATED=0
-if printf '%s' "$FILES" | grep -qE '\.github/workflows/|\.github/scripts/|channels/|src/signature\.rs|src/provision\.rs|src/manifest\.rs|src/fingerprint\.rs'; then
-  FOUNDER_GATED=1
-fi
-# enscrive-secrets-manager (esm) is a trust anchor — the secrets manager itself.
-# It is dispatchable (a worker may propose changes), but EVERY change to it is
-# founder-merged, never auto-merged, whatever files it touches. (Secret VALUES
-# remain founder-only regardless; this gates esm CODE at the merge boundary.)
-case "$REPO" in
-  */enscrive-secrets-manager) FOUNDER_GATED=1 ;;
-esac
+# De-gated (founder-directed 2026-06-29): the reviewer no longer withholds the
+# merge for any path. EVERY PR — whatever files it touches, including the
+# root-of-trust (this harness, workflows, the release trust pipeline) — flows
+# through the normal approve + auto-merge path. Root-of-trust PRs are STILL
+# independently reviewed (the high-risk escalation below still applies a higher
+# bar and the stronger model); the reviewer simply no longer holds them back for
+# a human merge. The orchestrator is the final arbiter, not a PR-time gate.
 
 # High-risk paths escalate the review model (Sonnet -> Opus); this does NOT block
 # on its own. Tracks the real trust surface (auth, billing/metering/ledger,
@@ -238,26 +228,6 @@ BLOCK_COUNT=$(count_blocking_issues /tmp/decision.json)
 VERDICT=$(effective_decision "$DECISION" "$BLOCK_COUNT" "$TRUNCATED" "$PASS_CONF")
 echo "Effective verdict: $VERDICT (raw decision=$DECISION confidence=$CONF blockers=$BLOCK_COUNT truncated=$TRUNCATED)"
 
-# Root-of-trust changes are NEVER auto-merged, whatever the effective verdict
-# above (restored here after an ENS-854 patching error briefly dropped this
-# gate -- see PR discussion). Post the review as guidance, label
-# needs-founder, and stop (no approval) so branch protection holds the PR
-# for a human merge. The check stays green: this is a deliberate hold, not a
-# failure. This composes WITH the ENS-569/ENS-854 verdict guard above, not in
-# place of it: even an approve:coerced verdict on a root-of-trust file still
-# stops here, unmerged.
-if [ "$FOUNDER_GATED" = "1" ]; then
-  echo "FOUNDER-GATED path touched -> escalate to founder (no auto-merge)"
-  gh label create needs-founder --color B60205 \
-    --description "Touches root-of-trust: reviewer harness / workflows / release trust pipeline" 2>/dev/null || true
-  gh pr edit "$PR" --add-label needs-founder || true
-  EXTRA=""
-  [ -n "$ISSUES" ] && EXTRA=$(printf '\n\nReviewer notes:\n%s' "$ISSUES")
-  BODY_MD=$(printf '[auto-review] (ENS-569): **FOUNDER MERGE REQUIRED** — this PR touches the root-of-trust (the reviewer harness, a workflow, or the release trust pipeline), which is never auto-merged. Reviewer assessment (model %s, confidence %s — this is NOT an approval):\n\n%s%s' "$MODEL" "$CONF" "$SUMMARY" "$EXTRA")
-  gh pr comment "$PR" --body "$BODY_MD"
-  exit 0
-fi
-
 if [ "$VERDICT" = "approve:model" ] || [ "$VERDICT" = "approve:coerced" ]; then
   echo "APPROVE + auto-merge (verdict $VERDICT, confidence $CONF)"
   if [ "$VERDICT" = "approve:coerced" ]; then
@@ -298,11 +268,11 @@ PRIOR=$(gh pr view "$PR" --json reviews \
 PRIOR=${PRIOR:-0}
 
 if [ "$PRIOR" -ge 2 ]; then
-  echo "Flapping ceiling hit ($PRIOR prior change-requests) -> escalate to founder"
-  gh label create needs-founder --color B60205 \
+  echo "Flapping ceiling hit ($PRIOR prior change-requests) -> escalate to orchestrator"
+  gh label create needs-orchestrator --color FBCA04 \
     --description "Reviewer escalation: exceeded change-request cycles" 2>/dev/null || true
-  gh pr edit "$PR" --add-label needs-founder || true
-  CMT=$(printf '[auto-review] requested changes %sx (ENS-569 flapping ceiling reached). Escalating to founder rather than looping.\n\nLatest blocking issues:\n%s' "$PRIOR" "$ISSUES")
+  gh pr edit "$PR" --add-label needs-orchestrator || true
+  CMT=$(printf '[auto-review] requested changes %sx (ENS-569 flapping ceiling reached). Escalating to the orchestrator (final arbiter) rather than looping.\n\nLatest blocking issues:\n%s' "$PRIOR" "$ISSUES")
   gh pr comment "$PR" --body "$CMT"
 else
   echo "Request changes (cycle $((PRIOR + 1)))"

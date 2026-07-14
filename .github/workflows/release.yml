@@ -263,3 +263,50 @@ jobs:
           }
           EOF
           echo "Notification dispatched."
+
+  # ---------------------------------------------------------------------------
+  # ENS-1177 — release-failure alerting. A failed release previously went
+  # silent for three weeks (ct-tui v20260709-1611 cosign fetch SPOF left
+  # enscrive-probe frozen on v20260619-2225, nothing alerted). This job files
+  # (or comments on) a GitHub issue whenever a required job in this workflow
+  # fails, so a broken release surfaces instead of rotting quietly.
+  # ---------------------------------------------------------------------------
+  notify-on-failure:
+    name: alert on release failure (ENS-1177)
+    needs: [build, aggregate, notify-orchestrator]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: File or update release-failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY}"
+          RUN_URL="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
+          REF="${GITHUB_REF_NAME}"
+          TITLE="release failed: ${REF}"
+
+          gh label create "release-failure" --repo "${REPO}" \
+            --color "B60205" \
+            --description "Automated: a release workflow run failed (ENS-1177)" \
+            2>/dev/null || true
+
+          EXISTING=$(gh issue list --repo "${REPO}" --label "release-failure" --state open \
+            --search "in:title \"${TITLE}\"" --json number --jq '.[0].number // empty')
+
+          BODY="Release workflow failed for \`${REPO}\` on ref \`${REF}\`.
+
+          Run: ${RUN_URL}
+
+          Filed automatically by the ENS-1177 release-failure alert job. A prior silent failure (ct-tui cosign fetch SPOF, 2026-07-09) froze enscrive-probe for three weeks with no alert — this exists so that doesn't happen again."
+
+          if [ -n "${EXISTING}" ]; then
+            gh issue comment "${EXISTING}" --repo "${REPO}" --body "Recurred: ${RUN_URL}"
+            echo "Commented on existing issue #${EXISTING}."
+          else
+            gh issue create --repo "${REPO}" --title "${TITLE}" --body "${BODY}" --label "release-failure"
+            echo "Filed new release-failure issue."
+          fi

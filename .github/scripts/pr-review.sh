@@ -13,6 +13,12 @@
 #   APPROVE_THRESHOLD   - min confidence to auto-approve (default 0.80)
 #   DIFF_CHAR_CAP       - max diff chars fed to the model (default 120000)
 #   REVIEWER_BOT_LOGIN  - the bot's GitHub login (default enscrive-reviewer-bot)
+#   AUTO_MERGE          - "true" to let the reviewer enable native auto-merge
+#                         on approve. Defaults to "false": the orchestrator is
+#                         the final merge arbiter after independent review
+#                         (A-002). Do NOT substitute the repository's
+#                         allow_auto_merge setting for this flag -- that hands
+#                         merge authority to the bot with nothing recording why.
 #
 # Safety: the diff/title/body are untrusted DATA passed as the user prompt; the
 # trusted rules live in the system prompt. Single-turn, no tools. Approve+merge
@@ -93,6 +99,7 @@ REPO="${GITHUB_REPOSITORY:?}"
 THRESHOLD="${APPROVE_THRESHOLD:-0.80}"
 CAP="${DIFF_CHAR_CAP:-120000}"
 BOT_LOGIN="${REVIEWER_BOT_LOGIN:-enscrive-reviewer-bot}"
+AUTO_MERGE="${AUTO_MERGE:-false}"
 
 # Never review the bot's own PRs (no self-loop).
 AUTHOR=$(gh pr view "$PR" --json author -q '.author.login')
@@ -229,7 +236,7 @@ VERDICT=$(effective_decision "$DECISION" "$BLOCK_COUNT" "$TRUNCATED" "$PASS_CONF
 echo "Effective verdict: $VERDICT (raw decision=$DECISION confidence=$CONF blockers=$BLOCK_COUNT truncated=$TRUNCATED)"
 
 if [ "$VERDICT" = "approve:model" ] || [ "$VERDICT" = "approve:coerced" ]; then
-  echo "APPROVE + auto-merge (verdict $VERDICT, confidence $CONF)"
+  echo "APPROVE (verdict $VERDICT, confidence $CONF)"
   if [ "$VERDICT" = "approve:coerced" ]; then
     # ENS-854: name which path was coerced, for the visible note.
     if [ "$DECISION" = "request_changes" ]; then
@@ -249,17 +256,29 @@ if [ "$VERDICT" = "approve:model" ] || [ "$VERDICT" = "approve:coerced" ]; then
     BODY_MD=$(printf '[auto-review] (ENS-569): **APPROVED** - confidence %s.\n\n%s' "$CONF" "$SUMMARY")
   fi
   [ -n "$HRNOTES" ] && BODY_MD=$(printf '%s\n\nHigh-risk notes: %s' "$BODY_MD" "$HRNOTES")
-  gh pr review "$PR" --approve --body "$BODY_MD"
-  # The approval above is this script's actual job, and it has now landed.
-  # Enabling auto-merge is best-effort: it fails for reasons that say nothing
-  # about the review -- the repo has auto-merge disabled (allow_auto_merge=
-  # false), branch protection blocks it, the PR is already merged, or the API
-  # blips. Under `set -e` any of those exits non-zero and turns a POSTED
-  # APPROVAL into a red `review` check, blocking the very PR just approved.
-  # Fail soft: log and exit 0. Merging is the orchestrator's act (A-002).
-  if ! gh pr merge "$PR" --auto --squash 2>&1; then
-    echo "NOTE: could not enable auto-merge on PR #$PR (see error above)."
-    echo "The approval IS posted; this check stays green. Merging is left to the orchestrator (A-002)."
+  # A-002: the orchestrator is the final merge arbiter after independent
+  # review. The reviewer's job ends at posting the verdict -- merging is the
+  # arbiter's act, not the reviewer's. AUTO_MERGE therefore defaults to false
+  # and the reviewer approves without merging.
+  #
+  # If a green check is ever wanted back by way of merging, set AUTO_MERGE
+  # here. Do NOT instead flip the repository's allow_auto_merge setting: that
+  # silently hands merge authority to the bot, leaves no record of the policy
+  # change in this repo, and voids A-002.
+  if [ "$AUTO_MERGE" = "true" ]; then
+    BODY_MD=$(printf '%s\n\nAuto-merge enabled by the reviewer (AUTO_MERGE=true).' "$BODY_MD")
+    gh pr review "$PR" --approve --body "$BODY_MD"
+    # Best-effort: enabling auto-merge fails for reasons that say nothing about
+    # the review (allow_auto_merge off, branch protection, already merged, a
+    # transient API error). Under `set -e` any of those would turn a POSTED
+    # APPROVAL into a red `review` check. Log and continue instead.
+    if ! gh pr merge "$PR" --auto --squash 2>&1; then
+      echo "NOTE: could not enable auto-merge on PR #$PR (see error above)."
+      echo "The approval IS posted; this check stays green. Merging is left to the orchestrator (A-002)."
+    fi
+  else
+    BODY_MD=$(printf '%s\n\nNot merging: the orchestrator is the final merge arbiter after independent review (A-002). Approval only.' "$BODY_MD")
+    gh pr review "$PR" --approve --body "$BODY_MD"
   fi
   exit 0
 fi

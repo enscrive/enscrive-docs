@@ -250,7 +250,17 @@ if [ "$VERDICT" = "approve:model" ] || [ "$VERDICT" = "approve:coerced" ]; then
   fi
   [ -n "$HRNOTES" ] && BODY_MD=$(printf '%s\n\nHigh-risk notes: %s' "$BODY_MD" "$HRNOTES")
   gh pr review "$PR" --approve --body "$BODY_MD"
-  gh pr merge "$PR" --auto --squash
+  # The approval above is this script's actual job, and it has now landed.
+  # Enabling auto-merge is best-effort: it fails for reasons that say nothing
+  # about the review -- the repo has auto-merge disabled (allow_auto_merge=
+  # false), branch protection blocks it, the PR is already merged, or the API
+  # blips. Under `set -e` any of those exits non-zero and turns a POSTED
+  # APPROVAL into a red `review` check, blocking the very PR just approved.
+  # Fail soft: log and exit 0. Merging is the orchestrator's act (A-002).
+  if ! gh pr merge "$PR" --auto --squash 2>&1; then
+    echo "NOTE: could not enable auto-merge on PR #$PR (see error above)."
+    echo "The approval IS posted; this check stays green. Merging is left to the orchestrator (A-002)."
+  fi
   exit 0
 fi
 
@@ -263,8 +273,12 @@ if [ "$VERDICT" = "request_changes:truncated" ] && [ "$BLOCK_COUNT" -eq 0 ]; the
 fi
 
 # Not approved -> request changes, with a hard flapping ceiling.
+# `|| true` makes the `${PRIOR:-0}` fallback below actually reachable: under
+# `set -e` a failed `gh pr view` aborts the script at this assignment, so the
+# fallback never ran for the case it was written for. A transient API error now
+# degrades to "no prior change-requests" instead of failing the check.
 PRIOR=$(gh pr view "$PR" --json reviews \
-  -q "[.reviews[] | select(.author.login==\"$BOT_LOGIN\" and .state==\"CHANGES_REQUESTED\")] | length")
+  -q "[.reviews[] | select(.author.login==\"$BOT_LOGIN\" and .state==\"CHANGES_REQUESTED\")] | length" || true)
 PRIOR=${PRIOR:-0}
 
 if [ "$PRIOR" -ge 2 ]; then
@@ -273,7 +287,7 @@ if [ "$PRIOR" -ge 2 ]; then
     --description "Reviewer escalation: exceeded change-request cycles" 2>/dev/null || true
   gh pr edit "$PR" --add-label needs-orchestrator || true
   CMT=$(printf '[auto-review] requested changes %sx (ENS-569 flapping ceiling reached). Escalating to the orchestrator (final arbiter) rather than looping.\n\nLatest blocking issues:\n%s' "$PRIOR" "$ISSUES")
-  gh pr comment "$PR" --body "$CMT"
+  gh pr comment "$PR" --body "$CMT" || true
 else
   echo "Request changes (cycle $((PRIOR + 1)))"
   BODY_MD=$(printf '[auto-review] (ENS-569): **CHANGES REQUESTED** - confidence %s.\n\n%s\n\nBlocking issues:\n%s' "$CONF" "$SUMMARY" "$ISSUES")

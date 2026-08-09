@@ -5,9 +5,12 @@ name: pr-review
 #
 # On a non-draft PR: a headless `claude -p` reviewer judges the diff and emits a
 # structured decision. On approve + sufficient confidence, a GitHub App identity
-# (minted at runtime, not a long-lived PAT) posts APPROVE and enables native
-# auto-merge; GitHub merges once the required ci/* checks are green. Self-skips
-# (green) until the App + key secrets are set. See ENS-569.
+# (minted at runtime, not a long-lived PAT) posts APPROVE and stops there: the
+# orchestrator is the final merge arbiter after independent review (A-002).
+# Set AUTO_MERGE below to "true" to have the reviewer enable native auto-merge
+# instead -- do NOT flip the repository's allow_auto_merge setting to get the
+# same effect, which leaves no record of the policy change. Self-skips (green)
+# until the App + key secrets are set. See ENS-569.
 #
 # Required secrets (org-level):
 #   REVIEWER_APP_ID           - the reviewer GitHub App's numeric id
@@ -69,4 +72,5 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           APPROVE_THRESHOLD: "0.80"
           DIFF_CHAR_CAP: "120000"
+          AUTO_MERGE: "false"
         run: bash .github/scripts/pr-review.sh

@@ -13,6 +13,12 @@
 #   APPROVE_THRESHOLD   - min confidence to auto-approve (default 0.80)
 #   DIFF_CHAR_CAP       - max diff chars fed to the model (default 120000)
 #   REVIEWER_BOT_LOGIN  - the bot's GitHub login (default enscrive-reviewer-bot)
+#   AUTO_MERGE          - "true" to let the reviewer enable native auto-merge
+#                         on approve. Defaults to "false": the orchestrator is
+#                         the final merge arbiter after independent review
+#                         (A-002). Do NOT substitute the repository's
+#                         allow_auto_merge setting for this flag -- that hands
+#                         merge authority to the bot with nothing recording why.
 #
 # Safety: the diff/title/body are untrusted DATA passed as the user prompt; the
 # trusted rules live in the system prompt. Single-turn, no tools. Approve+merge
@@ -93,6 +99,7 @@ REPO="${GITHUB_REPOSITORY:?}"
 THRESHOLD="${APPROVE_THRESHOLD:-0.80}"
 CAP="${DIFF_CHAR_CAP:-120000}"
 BOT_LOGIN="${REVIEWER_BOT_LOGIN:-enscrive-reviewer-bot}"
+AUTO_MERGE="${AUTO_MERGE:-false}"
 
 # Never review the bot's own PRs (no self-loop).
 AUTHOR=$(gh pr view "$PR" --json author -q '.author.login')
@@ -229,7 +236,7 @@ VERDICT=$(effective_decision "$DECISION" "$BLOCK_COUNT" "$TRUNCATED" "$PASS_CONF
 echo "Effective verdict: $VERDICT (raw decision=$DECISION confidence=$CONF blockers=$BLOCK_COUNT truncated=$TRUNCATED)"
 
 if [ "$VERDICT" = "approve:model" ] || [ "$VERDICT" = "approve:coerced" ]; then
-  echo "APPROVE + auto-merge (verdict $VERDICT, confidence $CONF)"
+  echo "APPROVE (verdict $VERDICT, confidence $CONF)"
   if [ "$VERDICT" = "approve:coerced" ]; then
     # ENS-854: name which path was coerced, for the visible note.
     if [ "$DECISION" = "request_changes" ]; then
@@ -249,8 +256,30 @@ if [ "$VERDICT" = "approve:model" ] || [ "$VERDICT" = "approve:coerced" ]; then
     BODY_MD=$(printf '[auto-review] (ENS-569): **APPROVED** - confidence %s.\n\n%s' "$CONF" "$SUMMARY")
   fi
   [ -n "$HRNOTES" ] && BODY_MD=$(printf '%s\n\nHigh-risk notes: %s' "$BODY_MD" "$HRNOTES")
-  gh pr review "$PR" --approve --body "$BODY_MD"
-  gh pr merge "$PR" --auto --squash
+  # A-002: the orchestrator is the final merge arbiter after independent
+  # review. The reviewer's job ends at posting the verdict -- merging is the
+  # arbiter's act, not the reviewer's. AUTO_MERGE therefore defaults to false
+  # and the reviewer approves without merging.
+  #
+  # If a green check is ever wanted back by way of merging, set AUTO_MERGE
+  # here. Do NOT instead flip the repository's allow_auto_merge setting: that
+  # silently hands merge authority to the bot, leaves no record of the policy
+  # change in this repo, and voids A-002.
+  if [ "$AUTO_MERGE" = "true" ]; then
+    BODY_MD=$(printf '%s\n\nAuto-merge enabled by the reviewer (AUTO_MERGE=true).' "$BODY_MD")
+    gh pr review "$PR" --approve --body "$BODY_MD"
+    # Best-effort: enabling auto-merge fails for reasons that say nothing about
+    # the review (allow_auto_merge off, branch protection, already merged, a
+    # transient API error). Under `set -e` any of those would turn a POSTED
+    # APPROVAL into a red `review` check. Log and continue instead.
+    if ! gh pr merge "$PR" --auto --squash 2>&1; then
+      echo "NOTE: could not enable auto-merge on PR #$PR (see error above)."
+      echo "The approval IS posted; this check stays green. Merging is left to the orchestrator (A-002)."
+    fi
+  else
+    BODY_MD=$(printf '%s\n\nNot merging: the orchestrator is the final merge arbiter after independent review (A-002). Approval only.' "$BODY_MD")
+    gh pr review "$PR" --approve --body "$BODY_MD"
+  fi
   exit 0
 fi
 
@@ -263,8 +292,12 @@ if [ "$VERDICT" = "request_changes:truncated" ] && [ "$BLOCK_COUNT" -eq 0 ]; the
 fi
 
 # Not approved -> request changes, with a hard flapping ceiling.
+# `|| true` makes the `${PRIOR:-0}` fallback below actually reachable: under
+# `set -e` a failed `gh pr view` aborts the script at this assignment, so the
+# fallback never ran for the case it was written for. A transient API error now
+# degrades to "no prior change-requests" instead of failing the check.
 PRIOR=$(gh pr view "$PR" --json reviews \
-  -q "[.reviews[] | select(.author.login==\"$BOT_LOGIN\" and .state==\"CHANGES_REQUESTED\")] | length")
+  -q "[.reviews[] | select(.author.login==\"$BOT_LOGIN\" and .state==\"CHANGES_REQUESTED\")] | length" || true)
 PRIOR=${PRIOR:-0}
 
 if [ "$PRIOR" -ge 2 ]; then
@@ -273,7 +306,7 @@ if [ "$PRIOR" -ge 2 ]; then
     --description "Reviewer escalation: exceeded change-request cycles" 2>/dev/null || true
   gh pr edit "$PR" --add-label needs-orchestrator || true
   CMT=$(printf '[auto-review] requested changes %sx (ENS-569 flapping ceiling reached). Escalating to the orchestrator (final arbiter) rather than looping.\n\nLatest blocking issues:\n%s' "$PRIOR" "$ISSUES")
-  gh pr comment "$PR" --body "$CMT"
+  gh pr comment "$PR" --body "$CMT" || true
 else
   echo "Request changes (cycle $((PRIOR + 1)))"
   BODY_MD=$(printf '[auto-review] (ENS-569): **CHANGES REQUESTED** - confidence %s.\n\n%s\n\nBlocking issues:\n%s' "$CONF" "$SUMMARY" "$ISSUES")

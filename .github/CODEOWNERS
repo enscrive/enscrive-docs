@@ -40,6 +40,12 @@
 #      The required review did NOT go away. What changed is who satisfies it:
 #      require_code_owner_reviews was set false precisely so the independent
 #      reviewer's approval satisfies the requirement instead of the founder's.
+#      VERIFY IT — a checkable fact, not an assertion in a file you are reading:
+#        gh api repos/enscrive/enscrive-docs/branches/main/protection \
+#          --jq '.required_pull_request_reviews
+#                | {approvals: .required_approving_review_count,
+#                   code_owners: .require_code_owner_reviews}'
+#      expected: {"approvals": 1, "code_owners": false}
 #   2. That reviewer is enscrive-reviewer[bot] running
 #      .github/workflows/pr-review.yml — an independent Opus review on every
 #      non-draft PR (A-002). AUTO_MERGE=false: the reviewer approves, the
@@ -54,13 +60,13 @@
 #      verdict" — never by a green check. This gate has now misreported itself
 #      five distinct ways.
 #
-# SELF-GATING. This file was previously protected by its own **/CODEOWNERS
-# rule, and that self-gate goes with the rest. What replaces it: the required
-# approving review above, plus HIGH_RISK escalation of CODEOWNERS itself, so an
-# edit to this register — including one that quietly deletes a path from it, or
-# weakens the HIGH_RISK regex — is still read by the strongest reviewer under a
-# required review. That is weaker than a human owner and is stated plainly
-# rather than papered over.
+# SELF-GATING. Worth stating precisely, because it is easy to overclaim: this
+# file was NEVER self-gated in this repo. The retired rules covered other paths
+# and no `**/CODEOWNERS` or `*` rule existed here, so no self-gate is being
+# removed. What guards an edit to this register is the required approving
+# review above, plus HIGH_RISK escalation of CODEOWNERS itself — so a change
+# that quietly deletes a path from it, or weakens the HIGH_RISK regex, is read
+# by the strongest reviewer under a required review.
 #
 # WHY THIS FILE STILL EXISTS. Every path below was marked high-risk for a real
 # reason, and that reason is worth keeping even though the founder is no longer
@@ -91,6 +97,20 @@
 #   If you add a path to this register, add it to that regex and re-measure.
 #   A register that claims protection it does not have is worse than no
 #   register: it is the failure mode this whole change set exists to remove.
+#
+# CAN THE REVIEWER APPROVE ITS OWN HARNESS? Yes, and that is a genuine
+# narrowing of control — stated here rather than left to be discovered. With
+# owner routing gone, a PR editing .github/scripts/pr-review.sh or
+# .github/workflows/ can carry the bot's own approval. What still stands
+# between that and main:
+#   * the bot CANNOT MERGE. AUTO_MERGE=false, and allow_auto_merge was set
+#     false across the fleet (A-034 / ENS-3513) after the reviewer squash-merged
+#     enscrive-embed #92 on its own sub-threshold approval. Approval is not
+#     merge; the orchestrator is the arbiter and is a different actor.
+#   * those paths escalate to Opus (HIGH_RISK), so the approval given is at
+#     least the strongest available.
+# If that is judged insufficient, the fix is branch protection requiring a
+# NON-BOT approval on .github/** — not a paragraph in this file.
 #
 # --- SENSITIVE PATHS (no owner; read these harder) ---------------------------
 

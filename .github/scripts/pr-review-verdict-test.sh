@@ -164,21 +164,36 @@ check "e2e: fail-safe unparseable     -> request_changes:real" request_changes:r
 # Extract the HIGH_RISK pattern by SENTINEL, not by "last grep -qiE in the
 # file" — that earlier form bound to whatever grep happened to come last, so
 # any unrelated grep added later would silently repoint every assertion below
-# at the wrong pattern while the suite still reported PASS. A guard that can
-# quietly test the wrong thing is the defect class this file exists to catch.
-HR_RE=$(grep -A6 'ENS-4350-REGEX-SENTINEL' "$HERE/pr-review.sh" \
-        | grep -oE "grep -qiE '[^']*'" | head -1 | sed -E "s/grep -qiE '//; s/'$//")
-if [ -z "$HR_RE" ] && ! grep -q '^HIGH_RISK=1$' "$HERE/pr-review.sh"; then
-  printf 'FAIL - ENS-4350 sentinel missing from pr-review.sh; the guard cannot bind\n'
-  FAILS=$((FAILS + 1))
-fi
-if [ -z "$HR_RE" ]; then
-  if grep -q '^HIGH_RISK=1$' "$HERE/pr-review.sh"; then
-    printf 'ok   - HIGH_RISK is unconditional in this repo; path matching N/A\n'
-  else
-    printf 'FAIL - could not extract the HIGH_RISK regex from pr-review.sh\n'
-    FAILS=$((FAILS + 1))
+# at the wrong pattern while still reporting PASS. A guard that can quietly
+# test the wrong thing is the defect class this file exists to catch.
+#
+# Every failure mode below reports ONCE, with a message naming which one it is.
+# An earlier revision incremented FAILS in two branches for a single missing
+# sentinel, which inflates the count and obscures the cause.
+HR_RE=""
+HR_ERR=""
+if grep -q 'ENS-4350-REGEX-SENTINEL' "$HERE/pr-review.sh"; then
+  HR_RE=$(grep -A6 'ENS-4350-REGEX-SENTINEL' "$HERE/pr-review.sh" \
+          | grep -oE "grep -qiE '[^']*'" | head -1 | sed -E "s/grep -qiE '//; s/'$//")
+  if [ -z "$HR_RE" ]; then
+    # Sentinel is present but no single-line `grep -qiE '...'` followed it.
+    # Most likely the regex was reflowed across lines, or now contains a single
+    # quote that breaks this extraction. Either way: say so precisely rather
+    # than silently proceeding with an empty pattern (which would make every
+    # assertion below vacuously fail and read like a regex regression).
+    HR_ERR="sentinel found but no single-line \`grep -qiE '...'\` within 6 lines of it (regex reflowed, or contains a single quote?)"
   fi
+elif grep -q '^HIGH_RISK=1$' "$HERE/pr-review.sh"; then
+  HR_ERR="unconditional"
+else
+  HR_ERR="ENS-4350 sentinel missing from pr-review.sh; the guard cannot bind to the HIGH_RISK pattern"
+fi
+
+if [ "$HR_ERR" = "unconditional" ]; then
+  printf 'ok   - HIGH_RISK is unconditional in this repo; path matching N/A\n'
+elif [ -n "$HR_ERR" ]; then
+  printf 'FAIL - %s\n' "$HR_ERR"
+  FAILS=$((FAILS + 1))
 else
   escalates() { printf '%s' "[\"$1\"]" | grep -qiE "$HR_RE" && echo 1 || echo 0; }
   check "ENS-4350 root path escalates: Cargo.toml" 1 "$(escalates 'Cargo.toml')"

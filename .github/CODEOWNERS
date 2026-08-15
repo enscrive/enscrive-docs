@@ -1,15 +1,40 @@
-# CODEOWNERS — Cloud-Native Dev Topology PRD §6.7
+# CODEOWNERS — enscrive-docs
 #
-# Founder review (@chrisroge) is REQUIRED, in addition to automated/agent
-# review, for high-risk paths. enscrive-docs has no high-risk service paths;
-# under §6.7 the only applicable rule is dependency manifests.
+# INTENTIONALLY NO OWNERS. (A-034, founder-directed, reaffirmed 2026-08-15)
 #
-# Enforcement note: to make this a hard gate, the repo's branch protection
-# must also enable "Require review from Code Owners".
+#   "My top priority is ensuring our github workflow is as I described with me
+#    providing zero founder reviews or founder merge, with the only exception
+#    being rate card changes or changes that touch the rate card."
+#
+# The founder<->orchestrator conversation is the endorsement. Independent review
+# is the `claude -p` reviewer (A-002, ENS-569); the orchestrator is the final
+# merge arbiter. Deploy beyond dev remains founder authority (A-003) — that gate
+# lives at `provision`, not at the PR.
+#
+# The ONE founder gate in the fleet is /rate-cards/ in enscrive-governance.
+# It is not here. Do not add an owner to this file.
+#
+# WHY THIS FILE STILL EXISTS. Every path below was marked high-risk for a real
+# reason, and that reason is worth keeping even though the founder is no longer
+# the reviewer. This file is now a REGISTER OF SENSITIVE PATHS: prose for a
+# human or agent reviewer, not a routing rule. The signal stays load-bearing in
+# machine terms too — .github/scripts/pr-review.sh escalates the reviewer model
+# from Sonnet to Opus (HIGH_RISK) for most of these paths, so a change here is
+# still read by the stronger reviewer.
+#
+# CATEGORIES THAT DELIBERATELY DO NOT APPLY HERE. enscrive-docs has no high-risk
+# service paths; under ADR-0003 / PRD §6.7 the only applicable rule was
+# dependency manifests. The workflows entry covers the shared supply-chain
+# surface every repo carries.
+#
+# --- SENSITIVE PATHS (no owner; read these harder) ---------------------------
 
-# Dependency manifests — major version bumps carry dependency-rot risk.
-**/Cargo.toml @chrisroge
+# **/Cargo.toml
+#     Dependency manifests — major version bumps carry dependency-rot risk.
+#     This repo builds the docs renderer as Rust crates (crates/core,
+#     crates/render, crates/cli), so a manifest change is third-party code
+#     entering the published docs build.
 
-# CI/CD workflows — supply-chain critical (release, signing, auto-publish on
-# merge per ENS-560). Founder-owned (ADR-0003 / PRD §6.7).
-/.github/workflows/** @chrisroge
+# /.github/workflows/**
+#     CI/CD workflows — supply-chain critical (release, signing, auto-publish
+#     on merge per ENS-560). Previously founder-owned under ADR-0003 / PRD §6.7.

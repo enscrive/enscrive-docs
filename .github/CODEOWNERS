@@ -92,7 +92,17 @@
 #     * alternatives written with a leading slash — /proto/, /migrations/,
 #       /audit, /auth, /esm/ — never matched a REPOSITORY-ROOT path at all,
 #       because grep saw no preceding separator. Escalation for those was
-#       silently dead. They are now anchored (^|/).
+#       silently dead. They are now anchored (^|["/]).
+#
+#   The FIRST attempt at that fix used (^|/) and was ALSO wrong, which is
+#   worth recording because the failure was in the verification, not the
+#   patch: $FILES is a COMPACT SINGLE-LINE JSON array
+#   ([".github/CODEOWNERS","..."]), so `^` matches only before the opening
+#   bracket and a root path is QUOTE-preceded. It was "verified" against bare
+#   path strings rather than that JSON, so the check reproduced the assumption
+#   instead of testing it. The assertions in
+#   .github/scripts/pr-review-verdict-test.sh now run the live regex against
+#   the exact shape the script greps (ENS-4350).
 #
 #   If you add a path to this register, add it to that regex and re-measure.
 #   A register that claims protection it does not have is worse than no

@@ -37,6 +37,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Guards the shared ENS-569/ENS-854 verdict machinery and the ENS-4350
+      # root-path escalation assertions. Runs BEFORE the secrets gate so it
+      # executes even when the reviewer is offline — a logic regression must not
+      # hide behind a missing API key.
+      #
+      # This step did not exist until 2026-08-15. The test file was present in
+      # ten repos and invoked by CI in two, so the assertions it contains had
+      # never run here. That is why ct-tui's reviewer could lose the ENS-854
+      # guard for weeks with nothing failing.
+      - name: Verdict logic self-test
+        run: bash .github/scripts/pr-review-verdict-test.sh
+
       - name: Gate on reviewer secrets
         id: gate
         env:

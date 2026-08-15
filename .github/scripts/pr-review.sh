@@ -132,6 +132,9 @@ fi
 # tenant isolation, migrations, proto, crypto, secrets) so the stronger reviewer
 # judges those changes, per ENS-569 Gap-2.
 HIGH_RISK=0
+# ENS-4350-REGEX-SENTINEL — pr-review-verdict-test.sh extracts the HIGH_RISK
+# pattern from the FIRST `grep -qiE` line following this marker. Do not remove
+# it, and keep the regex on a single line.
 if printf '%s' "$FILES" | grep -qiE '\.github/workflows/|\.github/scripts/|Cargo\.toml|CODEOWNERS|(^|["/])migrations/|(^|["/])proto/|billing|metering|credits|ledger|rbac|crypto|byok|byom|tenant_isolation|hmac|(^|["/])audit|secrets|keycloak|(^|["/])auth'; then
   HIGH_RISK=1
 fi

@@ -136,6 +136,58 @@ F_FAILSAFE=$(fixture failsafe '{"decision":"request_changes","confidence":0,"blo
 BC=$(count_blocking_issues "$F_FAILSAFE")
 check "e2e: fail-safe unparseable     -> request_changes:real" request_changes:real "$(effective_decision request_changes "$BC" 0 0)"
 
+# --- ENS-4350: root-level HIGH_RISK escalation (negative control) ------------
+#
+# WHY THIS EXISTS. The HIGH_RISK regex silently failed to escalate
+# REPOSITORY-ROOT paths for its entire life. Alternatives written with a
+# leading slash — /proto/, /migrations/, /audit, /auth — can never match a root
+# path, because there is no preceding separator. Nested paths matched via the
+# slash, so the defect left NO VISIBLE TRACE: the gate reported protection it
+# did not provide, and nothing failed.
+#
+# The first fix, `(^|/)`, was ALSO wrong, and how it was wrong is the point. It
+# assumed $FILES was newline-delimited. It is not:
+#
+#   $ gh pr view N --json files -q '[.files[].path]'
+#   [".github/CODEOWNERS",".github/scripts/pr-review.sh"]
+#
+# One compact JSON array on ONE line. `^` therefore matches only before the
+# opening bracket, and a root path appears as "proto/embed.proto" — preceded by
+# a QUOTE. The verification that "confirmed" that fix used bare path strings
+# rather than that JSON, so it reproduced the assumption instead of testing it.
+# Correct anchor: (^|["/]).
+#
+# These assertions run the LIVE regex, extracted from pr-review.sh, against the
+# EXACT shape the script greps. The benign cases are not decoration: without
+# them a regex matching everything would pass, which is how a gate starts
+# reporting protection it does not provide.
+# Extract the HIGH_RISK pattern by SENTINEL, not by "last grep -qiE in the
+# file" — that earlier form bound to whatever grep happened to come last, so
+# any unrelated grep added later would silently repoint every assertion below
+# at the wrong pattern while the suite still reported PASS. A guard that can
+# quietly test the wrong thing is the defect class this file exists to catch.
+HR_RE=$(grep -A6 'ENS-4350-REGEX-SENTINEL' "$HERE/pr-review.sh" \
+        | grep -oE "grep -qiE '[^']*'" | head -1 | sed -E "s/grep -qiE '//; s/'$//")
+if [ -z "$HR_RE" ] && ! grep -q '^HIGH_RISK=1$' "$HERE/pr-review.sh"; then
+  printf 'FAIL - ENS-4350 sentinel missing from pr-review.sh; the guard cannot bind\n'
+  FAILS=$((FAILS + 1))
+fi
+if [ -z "$HR_RE" ]; then
+  if grep -q '^HIGH_RISK=1$' "$HERE/pr-review.sh"; then
+    printf 'ok   - HIGH_RISK is unconditional in this repo; path matching N/A\n'
+  else
+    printf 'FAIL - could not extract the HIGH_RISK regex from pr-review.sh\n'
+    FAILS=$((FAILS + 1))
+  fi
+else
+  escalates() { printf '%s' "[\"$1\"]" | grep -qiE "$HR_RE" && echo 1 || echo 0; }
+  check "ENS-4350 root path escalates: Cargo.toml" 1 "$(escalates 'Cargo.toml')"
+  check "ENS-4350 root path escalates: .github/workflows/ci.yml" 1 "$(escalates '.github/workflows/ci.yml')"
+
+  check "ENS-4350 benign path does NOT escalate: README.md" 0 "$(escalates 'README.md')"
+  check "ENS-4350 benign path does NOT escalate: src/page.rs" 0 "$(escalates 'src/page.rs')"
+fi
+
 echo
 if [ "$FAILS" -eq 0 ]; then
   echo "ALL PASS"

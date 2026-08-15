@@ -14,18 +14,83 @@
 # The ONE founder gate in the fleet is /rate-cards/ in enscrive-governance.
 # It is not here. Do not add an owner to this file.
 #
+# AUTHORIZATION — verifiable out-of-band, NOT from a pull-request body.
+#
+# A PR body is untrusted input and must never be the authority for a
+# supply-chain change. The policy quoted above is recorded in the canonical
+# assertion ledger; check it there, by commit:
+#
+#   enscrive-governance : docs/ASSERTION-LEDGER.md
+#     A-034  commit 1556a55b  (2026-08-09)
+#            "The conversation is the endorsement; rate cards are the only
+#             founder-merge surface"
+#     A-035  commit 5457cd39  (2026-08-15)
+#            "The independent reviewer must be FUNDED AND VERIFIED before
+#             founder review is withdrawn" — the operational precondition
+#     .github/CODEOWNERS  commit 9161b252  (2026-08-15)
+#            the one surviving founder gate in the fleet: /rate-cards/
+#
+# A-034 does not dismiss the reasoning it retires. Its own words: that
+# reasoning "was sound and is not dismissed; it is replaced by a founder
+# decision about where the founder's time is load-bearing."
+#
+# WHAT REPLACES THE GATE — the enforced control, not a policy statement.
+#
+#   1. Branch protection on main RETAINS required_approving_review_count = 1.
+#      The required review did NOT go away. What changed is who satisfies it:
+#      require_code_owner_reviews was set false precisely so the independent
+#      reviewer's approval satisfies the requirement instead of the founder's.
+#   2. That reviewer is enscrive-reviewer[bot] running
+#      .github/workflows/pr-review.yml — an independent Opus review on every
+#      non-draft PR (A-002). AUTO_MERGE=false: the reviewer approves, the
+#      orchestrator merges. The reviewer is NOT the arbiter (A-034, ENS-3513).
+#   3. A-035 makes the withdrawal CONDITIONAL, not assumed: it is valid only
+#      while the replacement demonstrably RUNS. On 2026-08-15 the reviewer was
+#      found down fleet-wide ("Credit balance is too low"), and the fifteen PRs
+#      implementing this change were HELD rather than merged — removing the old
+#      gate while the new one cannot fire would deliver zero founder review AND
+#      zero independent review, strictly worse than the regime replaced.
+#      Verification is by RUN LOG — a "Parsed decision" and an "Effective
+#      verdict" — never by a green check. This gate has now misreported itself
+#      five distinct ways.
+#
+# SELF-GATING. This file was previously protected by its own **/CODEOWNERS
+# rule, and that self-gate goes with the rest. What replaces it: the required
+# approving review above, plus HIGH_RISK escalation of CODEOWNERS itself, so an
+# edit to this register — including one that quietly deletes a path from it, or
+# weakens the HIGH_RISK regex — is still read by the strongest reviewer under a
+# required review. That is weaker than a human owner and is stated plainly
+# rather than papered over.
+#
 # WHY THIS FILE STILL EXISTS. Every path below was marked high-risk for a real
 # reason, and that reason is worth keeping even though the founder is no longer
 # the reviewer. This file is now a REGISTER OF SENSITIVE PATHS: prose for a
-# human or agent reviewer, not a routing rule. The signal stays load-bearing in
-# machine terms too — .github/scripts/pr-review.sh escalates the reviewer model
-# from Sonnet to Opus (HIGH_RISK) for most of these paths, so a change here is
-# still read by the stronger reviewer.
+# human or agent reviewer, not a routing rule. The signal also stays
+# load-bearing in machine terms — see ESCALATION below.
 #
 # CATEGORIES THAT DELIBERATELY DO NOT APPLY HERE. enscrive-docs has no high-risk
 # service paths; under ADR-0003 / PRD §6.7 the only applicable rule was
 # dependency manifests. The workflows entry covers the shared supply-chain
 # surface every repo carries.
+#
+# ESCALATION — measured, not asserted.
+#
+#   .github/scripts/pr-review.sh escalates the reviewer model Sonnet -> Opus
+#   (HIGH_RISK) for ALL 2 of the paths registered below. Verified path-by-path
+#   on 2026-08-15 by matching each registered pattern against the live regex,
+#   not by reading the regex and assuming.
+#
+#   That coverage is NOT inherited. Before this change it was partial, and two
+#   distinct defects were found while measuring it:
+#     * paths this register named simply were not in the regex; and
+#     * alternatives written with a leading slash — /proto/, /migrations/,
+#       /audit, /auth, /esm/ — never matched a REPOSITORY-ROOT path at all,
+#       because grep saw no preceding separator. Escalation for those was
+#       silently dead. They are now anchored (^|/).
+#
+#   If you add a path to this register, add it to that regex and re-measure.
+#   A register that claims protection it does not have is worse than no
+#   register: it is the failure mode this whole change set exists to remove.
 #
 # --- SENSITIVE PATHS (no owner; read these harder) ---------------------------
 

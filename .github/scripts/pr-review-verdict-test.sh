@@ -196,11 +196,51 @@ elif [ -n "$HR_ERR" ]; then
   FAILS=$((FAILS + 1))
 else
   escalates() { printf '%s' "[\"$1\"]" | grep -qiE "$HR_RE" && echo 1 || echo 0; }
-  check "ENS-4350 root path escalates: Cargo.toml" 1 "$(escalates 'Cargo.toml')"
-  check "ENS-4350 root path escalates: .github/workflows/ci.yml" 1 "$(escalates '.github/workflows/ci.yml')"
+
+  # Anchored-alternative coverage. Each fixture is a REPOSITORY-ROOT path that
+  # matches ONLY via its (^|["/])-anchored alternative — i.e. through the quote
+  # that precedes a root path in the compact JSON array. Reverting the anchor
+  # to the buggy (^|/) form must make these FAIL; the negative-control block
+  # below proves that property against a deliberately reverted copy of the
+  # live regex instead of trusting this comment.
+  ANCHOR_FIXTURES='migrations/001_init.sql proto/embed.proto audit/retention.md auth/mod.rs'
+  for p in $ANCHOR_FIXTURES; do
+    check "ENS-4350 root path escalates via (^|[\"/]) anchor: $p" 1 "$(escalates "$p")"
+  done
+
+  # Nested paths reach the same alternatives through the "/" half of the
+  # anchor; a mutation that kept the quote but dropped the slash (or vice
+  # versa) is caught by one of these two groups.
+  NESTED_FIXTURES='src/db/migrations/002_add.sql services/api/proto/v1.proto server/audit/log.rs portal/auth/session.rs'
+  for p in $NESTED_FIXTURES; do
+    check "ENS-4350 nested path escalates via (^|[\"/]) anchor: $p" 1 "$(escalates "$p")"
+  done
+
+  # Unanchored keyword alternatives on root paths. Real coverage, but they
+  # match with or without the anchors (each also matches the reverted regex),
+  # so they are NOT anchor coverage — that is what the fixtures above are for.
+  check "ENS-4350 keyword alternative escalates: Cargo.toml" 1 "$(escalates 'Cargo.toml')"
+  check "ENS-4350 keyword alternative escalates: .github/workflows/ci.yml" 1 "$(escalates '.github/workflows/ci.yml')"
 
   check "ENS-4350 benign path does NOT escalate: README.md" 0 "$(escalates 'README.md')"
   check "ENS-4350 benign path does NOT escalate: src/page.rs" 0 "$(escalates 'src/page.rs')"
+
+  # Negative control against the reverted anchor. Derive a broken regex from
+  # the LIVE one by reverting every (^|["/]) anchor to (^|/) — the exact form
+  # the first fix shipped — and assert each anchored-alternative fixture does
+  # NOT match it. If a fixture ever drifts onto a path that an unanchored
+  # alternative covers, this control fails, instead of the suite silently
+  # passing under a reverted anchor.
+  BROKEN_RE=$(printf '%s' "$HR_RE" | sed 's/(\^|\["\/\])/(^|\/)/g')
+  if [ "$BROKEN_RE" = "$HR_RE" ]; then
+    printf 'FAIL - negative control: live HIGH_RISK regex contains no (^|["/]) anchor to revert\n'
+    FAILS=$((FAILS + 1))
+  else
+    reverted_escalates() { printf '%s' "[\"$1\"]" | grep -qiE "$BROKEN_RE" && echo 1 || echo 0; }
+    for p in $ANCHOR_FIXTURES; do
+      check "ENS-4350 negative control, anchor reverted to (^|/): $p must NOT match" 0 "$(reverted_escalates "$p")"
+    done
+  fi
 fi
 
 echo

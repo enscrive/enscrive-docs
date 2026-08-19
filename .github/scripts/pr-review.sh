@@ -179,10 +179,21 @@ HIGH_RISK=0
 # masked sha256). Per-repo widenings live in that one line; the rationale for
 # each widening is recorded in the PR that introduced it, not here.
 #
+# The files list is fed by here-string, NOT `printf '%s' "$FILES" | grep`:
+# grep -q exits at the first match, and a pipe writer that still has bytes in
+# flight then takes EPIPE — under pipefail that fails the whole pipeline and
+# silently flips a matched HIGH_RISK back to 0. A here-string is backed by a
+# file, so there is no pipe to break. This defect class killed reviews for
+# real: a retired per-file truncation loop piped >64KiB diff chunks into
+# `head -1` inside an assignment, and every over-cap PR died RED at ~3s with
+# "printf: write error: Broken pipe" (enscrive-code#72, runs 32285789638 and
+# 31900090083, 2026-08-19). No printf|early-exit-reader pipeline is allowed
+# anywhere in this script.
+#
 # ENS-4350-REGEX-SENTINEL — pr-review-verdict-test.sh extracts the HIGH_RISK
 # pattern from the FIRST `grep -qiE` line following this marker. Do not remove
 # it, and keep the regex on a single line.
-if printf '%s' "$FILES" | grep -qiE '\.github/workflows/|\.github/scripts/|Cargo\.toml|CODEOWNERS|(^|["/])migrations/|(^|["/])proto/|billing|metering|credits|ledger|rbac|crypto|byok|byom|tenant_isolation|hmac|(^|["/])audit|secrets|keycloak|(^|["/])auth'; then
+if grep -qiE '\.github/workflows/|\.github/scripts/|Cargo\.toml|CODEOWNERS|(^|["/])migrations/|(^|["/])proto/|billing|metering|credits|ledger|rbac|crypto|byok|byom|tenant_isolation|hmac|(^|["/])audit|secrets|keycloak|(^|["/])auth' <<<"$FILES"; then
   HIGH_RISK=1
 fi
 
@@ -263,13 +274,13 @@ while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
     RESULT_TXT=$(jq -r '.result // ""' /tmp/cc_raw.json)
     if [ "$IS_ERR" != "false" ]; then
       FAIL_REASON="api_error"
-      echo "Attempt $ATTEMPT: reviewer API error: $(printf '%s' "$RESULT_TXT" | head -c 300)"
+      echo "Attempt $ATTEMPT: reviewer API error: $(head -c 300 <<<"$RESULT_TXT")"
     elif parse_model_text /tmp/decision.json "$RESULT_TXT"; then
       PARSED=1
       break
     else
       FAIL_REASON="unparseable"
-      echo "Attempt $ATTEMPT: model text is not a valid decision object. First 500 chars: $(printf '%s' "$RESULT_TXT" | head -c 500)"
+      echo "Attempt $ATTEMPT: model text is not a valid decision object. First 500 chars: $(head -c 500 <<<"$RESULT_TXT")"
     fi
   fi
 

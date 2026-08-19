@@ -17,6 +17,15 @@
 #   retry recovery — garbage on attempt 1, a valid decision on attempt 2: the
 #     driver must exit 0 and post exactly one approval review.
 #
+#   over-cap diff — a diff larger than DIFF_CHAR_CAP whose shape mirrors the
+#     2026-08-19 enscrive-code#72 forensic (one file chunk larger than the
+#     64KiB pipe buffer): the driver must take the DESIGNED truncation path —
+#     exit 0, exactly one CHANGES_REQUESTED review naming the cap — and emit
+#     no broken-pipe noise anywhere. A retired per-file truncation loop piped
+#     such chunks into `head -1` inside an assignment and died RED at ~3s
+#     with "printf: write error: Broken pipe" before reviewing anything; this
+#     scenario locks that regression class shut.
+#
 # Per A-036 a fail-loud path ships only after being OBSERVED failing; this
 # test is that observation, and the pr-review.yml self-test step re-observes
 # it on every PR.
@@ -105,7 +114,11 @@ case "${1:-} ${2:-}" in
     esac
     ;;
   "pr diff")
-    printf 'diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n+pub fn stub() {}\n'
+    if [ -f "$STUB_STATE/diff.txt" ]; then
+      cat "$STUB_STATE/diff.txt"
+    else
+      printf 'diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n+pub fn stub() {}\n'
+    fi
     ;;
   *) : ;;
 esac
@@ -175,6 +188,40 @@ check "recovery: no changes-requested review posted" 0 \
   "$(grep -c -- '--request-changes' "$S2/calls.log" || true)"
 check "recovery: reviewer-retried label added for the retry" 1 \
   "$(grep -q -- '--add-label reviewer-retried' "$S2/calls.log" && echo 1 || echo 0)"
+
+# --- scenario 3: over-cap diff takes the designed truncation path ------------
+S3="$TMP/over-cap"
+mkdir -p "$S3"
+cp "$TMP/valid.txt" "$S3/result.last"
+# One small chunk plus one chunk well past the 64KiB pipe buffer, total past
+# the 120000-char default DIFF_CHAR_CAP — the exact shape that killed the
+# retired truncation loop.
+{
+  printf 'diff --git a/src/small.rs b/src/small.rs\n--- a/src/small.rs\n+++ b/src/small.rs\n'
+  i=0; while [ "$i" -lt 200 ]; do printf '+fn small_%s() {}\n' "$i"; i=$((i + 1)); done
+  printf 'diff --git a/src/big_fixture.rs b/src/big_fixture.rs\n--- a/src/big_fixture.rs\n+++ b/src/big_fixture.rs\n'
+  i=0; while [ "$i" -lt 2600 ]; do printf '+    let fixture_row_%05d = "0123456789abcdef0123456789abcdef";\n' "$i"; i=$((i + 1)); done
+} > "$S3/diff.txt"
+DIFF_CHARS=$(wc -m < "$S3/diff.txt")
+run_driver "$S3"
+
+echo "--- over-cap: driver log ---"
+sed -e 's/^/    /' "$S3/driver.log"
+echo "---"
+
+check_ge "over-cap: synthesized diff exceeds the 120000-char cap" 120001 "$DIFF_CHARS"
+check "over-cap: driver exit 0 (designed truncation path, not a crash)" 0 "$DRIVER_EXIT"
+check "over-cap: exactly 1 claude invocation" 1 "$(count_calls "$S3" 'claude ')"
+check "over-cap: exactly one CHANGES_REQUESTED review posted" 1 \
+  "$(count_calls "$S3" 'gh pr review 123 --request-changes')"
+check "over-cap: zero approvals posted" 0 \
+  "$(grep -c -- '--approve' "$S3/calls.log" || true)"
+check "over-cap: review body names the cap" 1 \
+  "$(grep -q 'Diff exceeds DIFF_CHAR_CAP' "$S3/calls.log" && echo 1 || echo 0)"
+check "over-cap: driver saw truncated=1" 1 \
+  "$(grep -q 'truncated=1' "$S3/driver.log" && echo 1 || echo 0)"
+check "over-cap: no broken-pipe noise in driver output" 0 \
+  "$(grep -ci 'broken pipe' "$S3/driver.log" || true)"
 
 echo
 if [ "$FAILS" -eq 0 ]; then

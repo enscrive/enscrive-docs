@@ -224,6 +224,12 @@ jobs:
   # enscrive-deploy channels/dev.toml [overrides] entry for this repo and
   # dispatches manifest.yml to publish a fresh latest.json.
   #
+  # A publish that cannot be pinned into the channel must be RED, not green.
+  # This job used to be continue-on-error, which let a dead/unset PAT leave
+  # the whole release run green while the binary was never pinned — see
+  # enscrive-governance audit 2026-08-28-RELEASE-PIPELINE-SILENT-PIN-FAILURE.
+  # It now fails the run so the ENS-1177 alert job below actually fires.
+  #
   # No sign job in this repo (intentional ENS-82 follow-on); notify gates on
   # build + aggregate only.
   # ---------------------------------------------------------------------------
@@ -232,7 +238,6 @@ jobs:
     needs: [build, aggregate]
     runs-on: ubuntu-latest
     if: success()
-    continue-on-error: true
     steps:
       - name: Dispatch release-published to orchestrator
         env:
@@ -240,9 +245,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${ORCHESTRATOR_PAT}" ]; then
-            echo "::warning::ENSCRIVE_ORCHESTRATOR_PAT not configured — orchestrator notification skipped."
+            echo "::error::ENSCRIVE_ORCHESTRATOR_PAT not configured — binary published but NOT pinned into the dev channel (ENS-538)"
             echo "Set the secret per ENS-538 to enable auto-publish."
-            exit 0
+            exit 1
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             REF_NAME="${{ github.event.inputs.ref_name }}"

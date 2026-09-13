@@ -3,6 +3,41 @@
 
 set -euo pipefail
 
+resolve_decision() {
+  local raw="$1" blockers="$2" truncated="$3"
+  if [ "$truncated" = true ] || [ "$blockers" -gt 0 ] || [ "$raw" = request_changes ]; then
+    printf '%s\n' request_changes
+  else
+    printf '%s\n' approve
+  fi
+}
+
+format_review_body() {
+  local decision="$1" head="$2" summary="$3" issues="$4" notes="$5"
+  local rendered
+  if [ "$decision" = request_changes ]; then
+    printf -v rendered '[auto-review] CHANGES REQUESTED on exact head %s.\n\n%s\n\nBlocking issues:\n%s' "$head" "$summary" "$issues"
+  else
+    printf -v rendered '[auto-review] APPROVED on exact head %s.\n\n%s' "$head" "$summary"
+  fi
+  if [ -n "$notes" ]; then
+    printf -v rendered '%s\n\nHigh-risk notes: %s' "$rendered" "$notes"
+  fi
+  printf '%s\n\nThe Orchestrator is the final technical arbiter; this reviewer never merges.\n' "$rendered"
+}
+
+if [ "${TRUSTED_PR_REVIEW_SELFTEST:-}" = 1 ]; then
+  test "$(resolve_decision approve 0 false)" = approve
+  test "$(resolve_decision request_changes 0 false)" = request_changes
+  test "$(resolve_decision approve 1 false)" = request_changes
+  test "$(resolve_decision approve 0 true)" = request_changes
+  body_test=$(format_review_body request_changes 0123456789012345678901234567890123456789 summary issue note)
+  test "$(printf '%s' "$body_test" | wc -l)" -ge 6
+  ! grep -q '\\n' <<<"$body_test"
+  echo "trusted review decision and formatting self-test passed"
+  exit 0
+fi
+
 PR="${PR:?PR number required}"
 REPO="${GITHUB_REPOSITORY:?repository required}"
 HEAD_SHA="${EXPECTED_HEAD_SHA:?event head required}"
@@ -87,16 +122,12 @@ done
 test "$parsed" = true
 
 blockers=$(jq '[.blocking_issues[] | select(type != "string" or test("\\S"))] | length' "$tmp_dir/verdict.json")
-decision=$(jq -r '.decision' "$tmp_dir/verdict.json")
+raw_decision=$(jq -r '.decision' "$tmp_dir/verdict.json")
 if [ "$truncated" = true ]; then
-  decision=request_changes
   jq '.blocking_issues += ["The diff exceeded the review input limit; split the PR into complete reviewable changes."]' "$tmp_dir/verdict.json" > "$tmp_dir/verdict.bounded.json"
   mv "$tmp_dir/verdict.bounded.json" "$tmp_dir/verdict.json"
-elif [ "$blockers" -gt 0 ]; then
-  decision=request_changes
-else
-  decision=approve
 fi
+decision=$(resolve_decision "$raw_decision" "$blockers" "$truncated")
 
 current=$(read_pr)
 test "$(jq -er '.head.sha' <<<"$current")" = "$HEAD_SHA"
@@ -108,15 +139,12 @@ notes=$(jq -r '.high_risk_notes // ""' "$tmp_dir/verdict.json")
 event=APPROVE
 review_state=APPROVED
 label=orchestrator-ready
-review_body="[auto-review] APPROVED on exact head ${HEAD_SHA}.\n\n${summary}"
 if [ "$decision" = request_changes ]; then
   event=REQUEST_CHANGES
   review_state=CHANGES_REQUESTED
   label=needs-orchestrator
-  review_body="[auto-review] CHANGES REQUESTED on exact head ${HEAD_SHA}.\n\n${summary}\n\nBlocking issues:\n${issues}"
 fi
-if [ -n "$notes" ]; then review_body="${review_body}\n\nHigh-risk notes: ${notes}"; fi
-review_body="${review_body}\n\nThe Orchestrator is the final technical arbiter; this reviewer never merges."
+review_body=$(format_review_body "$decision" "$HEAD_SHA" "$summary" "$issues" "$notes")
 
 response=$(gh api --method POST "repos/${REPO}/pulls/${PR}/reviews" \
   -f event="$event" -f commit_id="$HEAD_SHA" -f body="$review_body")
@@ -125,5 +153,10 @@ test "$(jq -er '.state' <<<"$response")" = "$review_state"
 
 gh label create "$label" --repo "$REPO" --color "FBCA04" \
   --description "Awaiting Orchestrator arbitration of exact-head review" 2>/dev/null || true
+if [ "$label" = orchestrator-ready ]; then
+  gh pr edit "$PR" --repo "$REPO" --remove-label needs-orchestrator >/dev/null 2>&1 || true
+else
+  gh pr edit "$PR" --repo "$REPO" --remove-label orchestrator-ready >/dev/null 2>&1 || true
+fi
 gh pr edit "$PR" --repo "$REPO" --add-label "$label" >/dev/null
 echo "posted $review_state for exact head $HEAD_SHA; Orchestrator intake label=$label"

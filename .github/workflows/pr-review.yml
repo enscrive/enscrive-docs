@@ -21,7 +21,10 @@ concurrency:
 jobs:
   review-control:
     name: review-control
-    if: github.event.pull_request.draft == false
+    if: >-
+      github.event.pull_request.draft == false &&
+      (github.event_name == 'pull_request_target' ||
+       github.event.pull_request.head.ref == 'ci/trusted-review-canary-a')
     runs-on: ubuntu-latest
     env:
       EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -66,6 +69,9 @@ jobs:
           test -n "${APP_ID:-}"
           test -n "${APP_KEY:-}"
 
+      - name: Review control self-test
+        run: TRUSTED_PR_REVIEW_SELFTEST=1 bash .github/scripts/trusted-pr-review.sh
+
       - name: Mint reviewer App token
         id: app_token
         uses: actions/create-github-app-token@v1
@@ -74,7 +80,7 @@ jobs:
           private-key: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
 
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @anthropic-ai/claude-code@2.1.270
 
       - name: Run exact-head independent review
         id: reviewer

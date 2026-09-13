@@ -1,93 +1,104 @@
 name: pr-review
 
-# Closed-loop automated PR reviewer (ENS-569). All logic lives in
-# .github/scripts/pr-review.sh; this file stays minimal and ASCII-clean.
-#
-# On a non-draft PR: a headless `claude -p` reviewer judges the diff and emits a
-# structured decision. On approve + sufficient confidence, a GitHub App identity
-# (minted at runtime, not a long-lived PAT) posts APPROVE and stops there: the
-# orchestrator is the final merge arbiter after independent review (A-002).
-# Set AUTO_MERGE below to "true" to have the reviewer enable native auto-merge
-# instead -- do NOT flip the repository's allow_auto_merge setting to get the
-# same effect, which leaves no record of the policy change. Self-skips (green)
-# until the App + key secrets are set. See ENS-569.
-#
-# Required secrets (org-level):
-#   REVIEWER_APP_ID           - the reviewer GitHub App's numeric id
-#   REVIEWER_APP_PRIVATE_KEY  - that App's PEM private key
-#   ANTHROPIC_API_KEY         - metered key for the claude -p reviewer
-
+# Bootstrap A retains pull_request for this installation PR only. After merge,
+# Bootstrap B removes that trigger; pull_request_target then loads this workflow
+# and its helper exclusively from the protected base revision.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
   pull-requests: write
+  checks: write
 
 concurrency:
-  group: pr-review-${{ github.event.pull_request.number }}
+  group: trusted-pr-review-${{ github.repository }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  review:
-    name: review
-    runs-on: ubuntu-latest
+  review-control:
+    name: review-control
     if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    env:
+      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      PR: ${{ github.event.pull_request.number }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the exact trusted base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      # Guards the shared ENS-569/ENS-854 verdict machinery, the ENS-4350
-      # root-path escalation assertions, and the D4 fail-loud driver contract
-      # (Rebalance ADR: stubbed forced-failure and retry-recovery runs of the
-      # real pr-review.sh — an engine failure must go RED, never fabricate a
-      # review). Runs BEFORE the secrets gate so it executes even when the
-      # reviewer is offline — a logic regression must not hide behind a
-      # missing API key.
-      #
-      # This step did not exist until 2026-08-15. The test file was present in
-      # ten repos and invoked by CI in two, so the assertions it contains had
-      # never run here. That is why ct-tui's reviewer could lose the ENS-854
-      # guard for weeks with nothing failing.
-      - name: Verdict logic self-test
+      - name: Create required check on the PR head
+        id: head_check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          bash .github/scripts/pr-review-verdict-test.sh
-          bash .github/scripts/pr-review-failloud-test.sh
+          set -euo pipefail
+          response=$(gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/check-runs" \
+            -f name=review \
+            -f head_sha="$EXPECTED_HEAD_SHA" \
+            -f status=in_progress \
+            -f details_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            -f external_id="pr-review:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:${PR}:${EXPECTED_HEAD_SHA}")
+          check_id=$(jq -er '.id' <<<"$response")
+          echo "id=$check_id" >> "$GITHUB_OUTPUT"
 
-      - name: Gate on reviewer secrets
-        id: gate
+      - name: Require reviewer configuration
+        id: config
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           APP_ID: ${{ secrets.REVIEWER_APP_ID }}
           APP_KEY: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
         run: |
-          if [ -z "${ANTHROPIC_API_KEY:-}" ] || [ -z "${APP_ID:-}" ] || [ -z "${APP_KEY:-}" ]; then
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "Reviewer secrets (ANTHROPIC_API_KEY / REVIEWER_APP_ID / REVIEWER_APP_PRIVATE_KEY) not set yet; skipping (job stays green)."
-          else
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          test -n "${ANTHROPIC_API_KEY:-}"
+          test -n "${APP_ID:-}"
+          test -n "${APP_KEY:-}"
 
       - name: Mint reviewer App token
-        id: apptoken
-        if: steps.gate.outputs.configured == 'true'
+        id: app_token
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.REVIEWER_APP_ID }}
           private-key: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
 
       - name: Install Claude Code CLI
-        if: steps.gate.outputs.configured == 'true'
         run: npm install -g @anthropic-ai/claude-code
 
-      - name: Review and act
-        if: steps.gate.outputs.configured == 'true'
+      - name: Run exact-head independent review
+        id: reviewer
         env:
-          GH_TOKEN: ${{ steps.apptoken.outputs.token }}
-          REVIEWER_BOT_LOGIN: ${{ steps.apptoken.outputs.app-slug }}[bot]
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          PR: ${{ github.event.pull_request.number }}
-          APPROVE_THRESHOLD: "0.80"
+          REVIEWER_BOT_LOGIN: ${{ steps.app_token.outputs.app-slug }}[bot]
           DIFF_CHAR_CAP: "120000"
-          AUTO_MERGE: "false"
-        run: bash .github/scripts/pr-review.sh
+        run: bash .github/scripts/trusted-pr-review.sh
+
+      - name: Finalize required head check
+        if: always() && steps.head_check.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_ID: ${{ steps.head_check.outputs.id }}
+          REVIEW_OUTCOME: ${{ steps.reviewer.outcome }}
+        run: |
+          set -euo pipefail
+          conclusion=failure
+          summary="Independent review did not complete for the exact PR head."
+          if [ "$REVIEW_OUTCOME" = success ]; then
+            conclusion=success
+            summary="Independent review completed and posted a verdict on the exact PR head."
+          fi
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/check-runs/${CHECK_ID}" \
+            -f status=completed \
+            -f conclusion="$conclusion" \
+            -f "output[title]=Exact-head Claude review" \
+            -f "output[summary]=$summary" >/dev/null

@@ -1,11 +1,8 @@
 name: pr-review
 
-# Bootstrap A retains pull_request for this installation PR only. After merge,
-# Bootstrap B removes that trigger; pull_request_target then loads this workflow
-# and its helper exclusively from the protected base revision.
+# The workflow and helper are loaded exclusively from the protected base
+# revision. Pull-request code is fetched only as inert diff data.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -15,31 +12,23 @@ permissions:
   checks: write
 
 concurrency:
-  # During Bootstrap A both event types exist. Separating them prevents a
-  # skipped legacy event from cancelling the authoritative target event.
   group: trusted-pr-review-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   review-control:
     name: review-control
-    if: >-
-      github.event.pull_request.draft == false &&
-      (github.event_name == 'pull_request_target' ||
-       github.event.pull_request.number == 27)
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     env:
       EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       PR: ${{ github.event.pull_request.number }}
     steps:
-      - name: Check out review control
+      - name: Check out the exact trusted base
         uses: actions/checkout@v4
         with:
-          # Bootstrap A is the sole legacy exception: main cannot supply a
-          # helper it does not contain yet. Permanent pull_request_target runs
-          # always select the exact base SHA and never execute PR code.
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
           persist-credentials: false
 

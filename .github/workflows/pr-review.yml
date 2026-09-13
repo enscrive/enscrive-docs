@@ -15,7 +15,9 @@ permissions:
   checks: write
 
 concurrency:
-  group: trusted-pr-review-${{ github.repository }}-${{ github.event.pull_request.number }}
+  # During Bootstrap A both event types exist. Separating them prevents a
+  # skipped legacy event from cancelling the authoritative target event.
+  group: trusted-pr-review-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -24,7 +26,7 @@ jobs:
     if: >-
       github.event.pull_request.draft == false &&
       (github.event_name == 'pull_request_target' ||
-       github.event.pull_request.head.ref == 'ci/trusted-review-canary-a')
+       github.event.pull_request.number == 27)
     runs-on: ubuntu-latest
     env:
       EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}

@@ -248,16 +248,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # VENDORED from enscrive-runners/.github/actions/install-cosign-verified
-      # (2026-07-18): enscrive-cli is a PUBLIC repo and GitHub never resolves
-      # a private repo's actions from a public caller — no org access setting
-      # changes that. The `uses:` form broke EVERY release since #40 landed
-      # it (v20260711-1523 → v20260714-1954, "Unable to resolve action"),
-      # leaving the shipped CLI binary a week stale (ENS-1608 + ~40 dupes).
-      # Behavior below is byte-faithful to the canonical action (retry +
-      # digest-pin + verified cache); keep the digest table in sync with the
-      # canonical copy via reviewed PRs. ENS-857 (no fleet workflow sync)
-      # tracks the drift class.
+      # Vendored from enscrive-runners because this public repository cannot
+      # resolve an action from that private repository. The retry, digest pin,
+      # and verified-cache behavior matches the fleet's canonical installer;
+      # keep the digest table synchronized through reviewed changes.
       - name: Restore cached cosign binary (unverified at this point)
         id: cache-restore
         uses: actions/cache@v4
@@ -404,8 +398,8 @@ jobs:
   # enscrive-governance audit 2026-08-28-RELEASE-PIPELINE-SILENT-PIN-FAILURE.
   # It now fails the run so the ENS-1177 alert job below actually fires.
   #
-  # No sign job in this repo (intentional ENS-82 follow-on); notify gates on
-  # build + aggregate only.
+  # Notification gates on signing so an unsigned release cannot advance the
+  # dev channel manifest.
   # ---------------------------------------------------------------------------
   notify-orchestrator:
     name: notify release orchestrator (ENS-538)

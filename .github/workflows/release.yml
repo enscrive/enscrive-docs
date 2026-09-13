@@ -23,11 +23,9 @@ env:
   CHANNEL: dev
   BINARY_NAME: enscrive-docs
 
-# NOTE(ENS-82 follow-on): cosign keyless signing is intentionally omitted from
-# this initial enscrive-docs release pipeline. The enscrive-cli release.yml
-# carries the canonical `sign:` job; once ENS-82 lands, mirror that block here
-# to bring enscrive-docs to parity with the rest of the Enscrive service
-# binaries (cli, developer, observe, embed).
+# Release artifacts use keyless cosign signing through GitHub Actions OIDC.
+# Provisioning pins this repository's release.yml identity and fails closed
+# when the per-binary .bundle is absent or invalid.
 
 jobs:
   build:
@@ -171,11 +169,23 @@ jobs:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Upload SHA256SUMS to S3
+      - name: Upload canonical and compatibility SHA256SUMS to S3
         shell: bash
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
+          CANONICAL_KEY="releases/${CHANNEL}/${TAG}/${BINARY_NAME}/SHA256SUMS"
+
+          # The binary-name segment makes this checksum index unambiguous when
+          # independently tagged repositories choose the same minute-based tag.
+          aws s3 cp \
+            dist/SHA256SUMS \
+            "s3://${S3_BUCKET}/${CANONICAL_KEY}" \
+            --cache-control "public, max-age=31536000, immutable"
+
+          # Compatibility alias only. Core consumers identify an artifact by
+          # its manifest URL + SHA-256 + repository-pinned cosign signature and
+          # do not consume this shared checksum key.
           aws s3 cp \
             dist/SHA256SUMS \
             "s3://${S3_BUCKET}/releases/${CHANNEL}/${TAG}/SHA256SUMS" \
@@ -213,10 +223,168 @@ jobs:
           body: |
             ## Verification
 
-            Checksums: `curl -fsSL https://dev.enscrive.io/releases/dev/${{ github.ref_name }}/SHA256SUMS | sha256sum -c --ignore-missing`
+            Checksums: `curl -fsSL https://dev.enscrive.io/releases/dev/${{ github.ref_name }}/enscrive-docs/SHA256SUMS | sha256sum -c --ignore-missing`
+
+            Signature bundle: `https://dev.enscrive.io/releases/dev/${{ github.ref_name }}/x86_64-unknown-linux-gnu/enscrive-docs.bundle`
           files: |
             dist/enscrive-docs-*
             dist/SHA256SUMS
+
+  # ---------------------------------------------------------------------------
+  # Keyless signing for the exact artifacts consumed by enscrive-deploy.
+  # The binary bundle is required. The signed, repository-scoped SHA256SUMS is
+  # the canonical human checksum index; the shared checksum key remains only
+  # as a compatibility alias because minute-based tags can coincide by repo.
+  # ---------------------------------------------------------------------------
+  sign:
+    name: cosign keyless signing
+    needs: [build, aggregate]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Vendored from enscrive-runners because this public repository cannot
+      # resolve an action from that private repository. The retry, digest pin,
+      # and verified-cache behavior matches the fleet's canonical installer;
+      # keep the digest table synchronized through reviewed changes.
+      - name: Restore cached cosign binary (unverified at this point)
+        id: cache-restore
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cosign-verified/cosign
+          key: cosign-verified-v2.5.2-${{ runner.os }}-${{ runner.arch }}
+      - name: "Install cosign (ENS-1177 pattern, vendored: verify cache or fetch with retries + digest pin)"
+        shell: bash
+        env:
+          COSIGN_VERSION: v2.5.2
+          INSTALL_DIR: ${{ github.workspace }}/.cosign-verified
+          RUNNER_OS_IN: ${{ runner.os }}
+          RUNNER_ARCH_IN: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          declare -A PINNED_SHA256=(
+            [v2.5.2/linux-amd64]="bcfeae05557a9f313ee4392d2f335d0ff69ebbfd232019e3736fb04999fe1734"
+            [v2.5.2/linux-arm64]="2cbcea1873ad76274c3f241ef175d204654e3aac3e73e6ec4504e5227015cb0a"
+            [v2.5.2/darwin-amd64]="0681abe20a482f4b9b3ed65b3debb8c6346591f2dc484b6bfa79609ff1318de4"
+            [v2.5.2/darwin-arm64]="51fdc6d8da8310d72df10065a52247b6bebfe990d4c946dd9f71e17588256011"
+          )
+          case "${RUNNER_OS_IN}" in
+            Linux)  plat_os="linux"  ;;
+            macOS)  plat_os="darwin" ;;
+            *) echo "::error::vendored install-cosign-verified: unsupported runner.os '${RUNNER_OS_IN}'"; exit 1 ;;
+          esac
+          case "${RUNNER_ARCH_IN}" in
+            X64)   plat_arch="amd64" ;;
+            ARM64) plat_arch="arm64" ;;
+            *) echo "::error::vendored install-cosign-verified: unsupported runner.arch '${RUNNER_ARCH_IN}'"; exit 1 ;;
+          esac
+          platform="${plat_os}-${plat_arch}"
+          key="${COSIGN_VERSION}/${platform}"
+          expected_sha256="${PINNED_SHA256[${key}]:-}"
+          if [[ -z "${expected_sha256}" ]]; then
+            echo "::error::vendored install-cosign-verified: no pinned digest for ${key}."
+            exit 1
+          fi
+          mkdir -p "${INSTALL_DIR}"
+          target="${INSTALL_DIR}/cosign"
+          verify_sha256() {
+            local actual
+            actual=$(sha256sum "$1" | cut -d' ' -f1)
+            [[ "${actual}" == "${expected_sha256}" ]]
+          }
+          if [[ -f "${target}" ]]; then
+            if verify_sha256 "${target}"; then
+              echo "cache hit: cosign ${COSIGN_VERSION} (${platform}) verified — no network fetch needed."
+              chmod +x "${target}"
+              echo "${INSTALL_DIR}" >> "${GITHUB_PATH}"
+              exit 0
+            fi
+            echo "::warning::vendored install-cosign-verified: cached binary failed digest verification — discarding."
+            rm -f "${target}"
+          fi
+          url="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-${platform}"
+          echo "Fetching ${url} ..."
+          attempt=0
+          max_attempts=3
+          until curl \
+            --fail --show-error --silent --location \
+            --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 90 \
+            --connect-timeout 10 --max-time 60 \
+            -o "${target}.download" \
+            "${url}"; do
+            attempt=$((attempt + 1))
+            if [[ "${attempt}" -ge "${max_attempts}" ]]; then
+              echo "::error::vendored install-cosign-verified: exhausted ${max_attempts} outer attempts fetching ${url}"
+              exit 1
+            fi
+            backoff=$((10 * attempt))
+            echo "::warning::vendored install-cosign-verified: fetch attempt ${attempt} failed, backing off ${backoff}s..."
+            sleep "${backoff}"
+          done
+          if ! verify_sha256 "${target}.download"; then
+            echo "::error::vendored install-cosign-verified: downloaded cosign does NOT match the pinned sha256. Refusing to install. expected=${expected_sha256}"
+            rm -f "${target}.download"
+            exit 1
+          fi
+          mv "${target}.download" "${target}"
+          chmod +x "${target}"
+          echo "${INSTALL_DIR}" >> "${GITHUB_PATH}"
+          echo "cosign ${COSIGN_VERSION} (${platform}) fetched, verified, and installed at ${target}."
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sign required binary and canonical checksum index
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+          TARGET="x86_64-unknown-linux-gnu"
+          WORK_DIR="/tmp/cosign-work"
+          mkdir -p "${WORK_DIR}"
+
+          BINARY_KEY="releases/${CHANNEL}/${TAG}/${TARGET}/${BINARY_NAME}"
+          BINARY_LOCAL="${WORK_DIR}/${BINARY_NAME}-${TARGET}"
+          aws s3 cp "s3://${S3_BUCKET}/${BINARY_KEY}" "${BINARY_LOCAL}"
+          cosign sign-blob \
+            --yes \
+            --bundle "${BINARY_LOCAL}.bundle" \
+            "${BINARY_LOCAL}"
+          cosign verify-blob \
+            --bundle "${BINARY_LOCAL}.bundle" \
+            --certificate-identity-regexp '^https://github\.com/enscrive/enscrive-docs/\.github/workflows/release\.yml@refs/' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${BINARY_LOCAL}"
+          aws s3 cp \
+            "${BINARY_LOCAL}.bundle" \
+            "s3://${S3_BUCKET}/${BINARY_KEY}.bundle" \
+            --cache-control "public, max-age=31536000, immutable"
+
+          SUMS_KEY="releases/${CHANNEL}/${TAG}/${BINARY_NAME}/SHA256SUMS"
+          SUMS_LOCAL="${WORK_DIR}/SHA256SUMS"
+          aws s3 cp "s3://${S3_BUCKET}/${SUMS_KEY}" "${SUMS_LOCAL}"
+          cosign sign-blob \
+            --yes \
+            --bundle "${SUMS_LOCAL}.bundle" \
+            "${SUMS_LOCAL}"
+          cosign verify-blob \
+            --bundle "${SUMS_LOCAL}.bundle" \
+            --certificate-identity-regexp '^https://github\.com/enscrive/enscrive-docs/\.github/workflows/release\.yml@refs/' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${SUMS_LOCAL}"
+          aws s3 cp \
+            "${SUMS_LOCAL}.bundle" \
+            "s3://${S3_BUCKET}/${SUMS_KEY}.bundle" \
+            --cache-control "public, max-age=31536000, immutable"
 
   # ---------------------------------------------------------------------------
   # ENS-538 — notify the release orchestrator that this tag has finished
@@ -230,12 +398,12 @@ jobs:
   # enscrive-governance audit 2026-08-28-RELEASE-PIPELINE-SILENT-PIN-FAILURE.
   # It now fails the run so the ENS-1177 alert job below actually fires.
   #
-  # No sign job in this repo (intentional ENS-82 follow-on); notify gates on
-  # build + aggregate only.
+  # Notification gates on signing so an unsigned release cannot advance the
+  # dev channel manifest.
   # ---------------------------------------------------------------------------
   notify-orchestrator:
     name: notify release orchestrator (ENS-538)
-    needs: [build, aggregate]
+    needs: [build, aggregate, sign]
     runs-on: ubuntu-latest
     if: success()
     steps:
@@ -278,7 +446,7 @@ jobs:
   # ---------------------------------------------------------------------------
   notify-on-failure:
     name: alert on release failure (ENS-1177)
-    needs: [build, aggregate, notify-orchestrator]
+    needs: [build, aggregate, sign, notify-orchestrator]
     if: failure()
     runs-on: ubuntu-latest
     permissions:

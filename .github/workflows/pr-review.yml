@@ -28,10 +28,13 @@ jobs:
       EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       PR: ${{ github.event.pull_request.number }}
     steps:
-      - name: Check out the exact trusted base
+      - name: Check out review control
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          # Bootstrap A is the sole legacy exception: main cannot supply a
+          # helper it does not contain yet. Permanent pull_request_target runs
+          # always select the exact base SHA and never execute PR code.
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
 

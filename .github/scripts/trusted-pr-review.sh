@@ -77,7 +77,7 @@ for attempt in 1 2 3; do
   set -e
   if [ "$cli_status" -eq 0 ] && jq -e '.is_error != true and (.result | type == "string")' "$tmp_dir/envelope.json" >/dev/null 2>&1; then
     jq -r '.result' "$tmp_dir/envelope.json" > "$tmp_dir/result.txt"
-    if jq -e 'type == "object" and (.decision == "approve" or .decision == "request_changes") and (.blocking_issues | type == "array")' "$tmp_dir/result.txt" > "$tmp_dir/verdict.json" 2>/dev/null; then
+    if jq -e 'select(type == "object" and (.decision == "approve" or .decision == "request_changes") and (.blocking_issues | type == "array"))' "$tmp_dir/result.txt" > "$tmp_dir/verdict.json" 2>/dev/null; then
       parsed=true
       break
     fi

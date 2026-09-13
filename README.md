@@ -76,3 +76,7 @@ The names and logos remain trademarks of Enscrive — see
 - Project home & docs: https://docs.enscrive.io (coming soon)
 - Enscrive platform: https://enscrive.io
 - Issues: https://github.com/enscrive/enscrive-docs/issues
+
+## Contributing
+
+Changes are proposed through pull requests. Before merge, each change must receive an approving review and pass the repository’s required CI checks.

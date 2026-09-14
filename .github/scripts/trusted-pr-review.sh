@@ -103,6 +103,7 @@ system_prompt='You are the independent pull-request reviewer for the Enscrive de
 parsed=false
 models=(sonnet haiku)
 attempt=0
+failure_class=not_attempted
 for model in "${models[@]}"; do
   attempt=$((attempt + 1))
   set +e
@@ -138,7 +139,21 @@ for model in "${models[@]}"; do
     sleep 15
   fi
 done
-test "$parsed" = true
+if [ "$parsed" != true ]; then
+  current=$(read_pr)
+  test "$(jq -er '.head.sha' <<<"$current")" = "$HEAD_SHA"
+  test "$(jq -er '.base.sha' <<<"$current")" = "$BASE_SHA"
+  gh label create needs-orchestrator --repo "$REPO" --color "D93F0B" \
+    --description "Automated review requires Orchestrator arbitration" 2>/dev/null || true
+  gh pr edit "$PR" --repo "$REPO" --remove-label orchestrator-ready >/dev/null 2>&1 || true
+  gh pr edit "$PR" --repo "$REPO" --add-label needs-orchestrator >/dev/null
+  marker="[auto-review-engine:${HEAD_SHA}]"
+  if ! gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+      --jq ".[] | select(.body | contains(\"${marker}\")) | .id" | grep -q .; then
+    gh pr comment "$PR" --repo "$REPO" --body "${marker} Automated review failed closed (${failure_class}) on exact head ${HEAD_SHA}. The Orchestrator must repair the review service, dispatch a fix if evidence supports one, or record a reasoned override before merge." >/dev/null
+  fi
+  exit 1
+fi
 
 blockers=$(jq '[.blocking_issues[] | select(type != "string" or test("\\S"))] | length' "$tmp_dir/verdict.json")
 raw_decision=$(jq -r '.decision' "$tmp_dir/verdict.json")

@@ -42,6 +42,9 @@ impl EnscriveClient {
     ) -> Self {
         let http = Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            // ENS-6483: never follow redirects — X-API-Key/X-Embedding-Provider-Key
+            // must not be resent to a different host.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("build http client");
         Self {
@@ -82,6 +85,9 @@ impl EnscriveClient {
             request = request.json(body);
         }
         let response = request.send().await?;
+        if response.status().is_redirection() {
+            return Err(redirect_error(&response));
+        }
         let status = response.status();
         let text = response.text().await?;
         if !status.is_success() {
@@ -225,11 +231,39 @@ impl EnscriveClient {
             .auth(self.http.get(self.url("/v1/corpora")))
             .send()
             .await?;
+        if response.status().is_redirection() {
+            return Err(redirect_error(&response));
+        }
         Ok(response.status())
     }
 }
 
 const NONE: Option<&serde_json::Value> = None;
+
+/// Best-effort host extracted from a 3xx response's `Location` header, for
+/// error messages only. Handles both absolute and relative `Location`
+/// values. Never returns the query string or full URL.
+fn redirect_location_host(response: &reqwest::Response) -> Option<String> {
+    let raw = response
+        .headers()
+        .get(reqwest::header::LOCATION)?
+        .to_str()
+        .ok()?;
+    let url = reqwest::Url::parse(raw)
+        .or_else(|_| response.url().join(raw))
+        .ok()?;
+    url.host_str().map(str::to_string)
+}
+
+/// Build the typed error for a 3xx response this client refuses to follow.
+/// Call this BEFORE reading the response body.
+fn redirect_error(response: &reqwest::Response) -> EnscriveError {
+    EnscriveError::Redirected {
+        status: response.status(),
+        location_host: redirect_location_host(response)
+            .unwrap_or_else(|| "an unspecified host".to_string()),
+    }
+}
 
 impl crate::jobs_polling::JobPoller for EnscriveClient {
     fn get_job_status(
@@ -237,5 +271,88 @@ impl crate::jobs_polling::JobPoller for EnscriveClient {
         job_id: &str,
     ) -> impl std::future::Future<Output = Result<ImportJobStatus>> + Send {
         EnscriveClient::get_job_status(self, job_id)
+    }
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener as StdTcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Spawn a one-shot mock HTTP server on a background thread. It accepts
+    /// exactly one connection, reads until it sees the end of the request
+    /// headers, records into `hit` that a connection was made, and writes
+    /// back `raw_response` verbatim. Returns the address to connect to.
+    fn spawn_mock(raw_response: String, hit: Arc<AtomicBool>) -> String {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind mock listener");
+        let addr = listener.local_addr().expect("mock listener address");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                hit.store(true, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let mut seen = Vec::new();
+                // Read until we've seen the end of the request headers (or
+                // the peer closes / buffer fills); we don't need a real
+                // HTTP parser for this test.
+                while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => seen.extend_from_slice(&buf[..n]),
+                        Err(_) => break,
+                    }
+                }
+                let _ = stream.write_all(raw_response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("127.0.0.1:{}", addr.port())
+    }
+
+    #[tokio::test]
+    async fn redirect_is_refused_and_target_is_never_contacted() {
+        let target_hit = Arc::new(AtomicBool::new(false));
+        let target_addr = spawn_mock(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_string(),
+            target_hit.clone(),
+        );
+
+        let redirect_hit = Arc::new(AtomicBool::new(false));
+        let redirect_response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/v1/corpora\r\nContent-Length: 0\r\n\r\n"
+        );
+        let redirect_addr = spawn_mock(redirect_response, redirect_hit.clone());
+
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), "test-secret-key");
+        let result = client.list_corpora().await;
+
+        match result {
+            Err(EnscriveError::Redirected { status, .. }) => {
+                assert_eq!(status.as_u16(), 302);
+            }
+            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
+        assert!(redirect_hit.load(Ordering::SeqCst), "redirecting server was never hit");
+        assert!(
+            !target_hit.load(Ordering::SeqCst),
+            "redirect target was contacted — X-API-Key may have been resent"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_response_is_returned_normally() {
+        let hit = Arc::new(AtomicBool::new(false));
+        let addr = spawn_mock(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n[]".to_string(),
+            hit.clone(),
+        );
+
+        let client = EnscriveClient::new(format!("http://{addr}"), "test-secret-key");
+        let result = client.list_corpora().await;
+
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert!(hit.load(Ordering::SeqCst));
     }
 }

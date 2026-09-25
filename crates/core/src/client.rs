@@ -516,7 +516,7 @@ mod redirect_tests {
     /// doesn't echo the live key at all.
     #[tokio::test]
     async fn redirect_error_redacts_a_known_key_shape() {
-        let redirect_response = "HTTP/1.1 302 Found\r\nLocation: http://sk-ant-api03-fakeAnthropicShapedValue.attacker.example/steal\r\nContent-Length: 0\r\n\r\n".to_string();
+        let redirect_response = "HTTP/1.1 302 Found\r\nLocation: http://sk-ant-FAKEtest-not-a-real-key-shape.attacker.example/steal\r\nContent-Length: 0\r\n\r\n".to_string();
         let redirect_calls = Arc::new(AtomicUsize::new(0));
         let redirect_addr = spawn_mock(redirect_response, redirect_calls);
 

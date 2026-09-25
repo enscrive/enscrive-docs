@@ -242,6 +242,18 @@ jobs:
               exit 1
             fi
           done
+          # The verified set must equal this repo's build matrix EXACTLY (the
+          # same target sign checks). An extra or missing target fails here,
+          # before anything is uploaded or released.
+          EXPECTED_TARGETS=(
+            x86_64-unknown-linux-gnu
+          )
+          mapfile -t GOT < <(sort verified-targets.txt)
+          mapfile -t WANT < <(printf '%s\n' "${EXPECTED_TARGETS[@]}" | sort)
+          if [ "${GOT[*]}" != "${WANT[*]}" ]; then
+            echo "::error::verified targets (${GOT[*]}) differ from the release matrix (${WANT[*]})"
+            exit 1
+          fi
           { echo "verified_sha256<<VERIFIED_SHA256_EOF"; printf '%s\n' "${VERIFIED_LINES[@]}"; echo "VERIFIED_SHA256_EOF"; } >> "$GITHUB_OUTPUT"
           echo "Verified SHA256 records:"
           printf '%s\n' "${VERIFIED_LINES[@]}"

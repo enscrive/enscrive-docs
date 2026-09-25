@@ -1,0 +1,23 @@
+# gitleaks config for enscrive-docs
+#
+# No repo-specific rules needed yet — this only extends the default ruleset
+# with a narrow allowlist for fake, non-functional test fixtures that happen
+# to match gitleaks' generic-api-key heuristic (a suggestively-named variable
+# assigned a mixed-case/digit string). None of these are real secrets, and
+# none is ever sent anywhere but a 127.0.0.1 mock server this test suite
+# spins up itself.
+#
+# Enforced server-side via the `secret-scan` job in .github/workflows/ci.yml.
+
+title = "enscrive-docs gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake test-fixture credentials, not real secrets"
+regexes = [
+  # ENS-6483 security wave 3: crates/core/src/client.rs's
+  # redirect_error_redacts_case_insensitively test fixture.
+  '''Test-Secret-KEY-42''',
+]

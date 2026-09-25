@@ -1,5 +1,20 @@
 name: release
 
+# Job split (security wave 3, ENS-6471; mirrors enscrive-developer #353 /
+# enscrive-embed #168): `build` compiles with `contents: read` only and no
+# OIDC token, and hands the binary plus its sha256 record to `publish` as a
+# run artifact. `publish` checks the release tag once, re-hashes the binary
+# against build's record, uploads it to S3, and exports the checked tag and
+# the verified sha256 line as job outputs. `aggregate` writes SHA256SUMS from
+# that verified line (still downloading the build artifact separately to
+# stage local files for the GitHub Release) and invalidates CloudFront; it
+# also creates the GitHub Release, so it alone keeps `contents: write`.
+# `sign` re-downloads the S3 objects and re-verifies them against the same
+# verified line before signing anything. `id-token: write` is granted only
+# to publish, aggregate and sign. No release job has a concurrency group, and
+# no release job restores an actions/cache entry (neither the cargo build
+# cache nor the cosign tool binary).
+
 on:
     push:
       tags:
@@ -12,8 +27,7 @@ on:
           type: string
 
 permissions:
-  id-token: write
-  contents: write
+  contents: read
 
 env:
   AWS_REGION: us-east-2
@@ -31,6 +45,8 @@ jobs:
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read   # security wave 3 (ENS-6471): no OIDC token in the build job
     strategy:
       fail-fast: false
       matrix:
@@ -41,22 +57,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Cache cargo registry and target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ matrix.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ matrix.os }}-cargo-${{ matrix.target }}-
 
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -103,28 +110,7 @@ jobs:
           shasum -a 256 "${BINARY_NAME}-${{ matrix.target }}" > "${BINARY_NAME}-${{ matrix.target }}.sha256"
           cat "${BINARY_NAME}-${{ matrix.target }}.sha256"
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Upload binary to S3
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          TARGET="${{ matrix.target }}"
-          aws s3 cp \
-            "dist/${BINARY_NAME}-${TARGET}" \
-            "s3://${S3_BUCKET}/releases/${CHANNEL}/${TAG}/${TARGET}/${BINARY_NAME}" \
-            --cache-control "public, max-age=31536000, immutable"
-          aws s3 cp \
-            "dist/${BINARY_NAME}-${TARGET}.sha256" \
-            "s3://${S3_BUCKET}/releases/${CHANNEL}/${TAG}/${TARGET}/${BINARY_NAME}.sha256" \
-            --cache-control "public, max-age=31536000, immutable"
-
-      - name: Upload artifact for aggregation
+      - name: Upload artifact for publish
         uses: actions/upload-artifact@v4
         with:
           name: enscrive-docs-${{ matrix.target }}
@@ -134,34 +120,220 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  aggregate:
-    name: aggregate + release
+  # ---------------------------------------------------------------------------
+  # Security wave 3 (ENS-6471): publish has the OIDC permission needed for S3.
+  # It verifies the transferred binary bytes against the build-recorded hash
+  # before uploading under the existing release object key.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: publish binary to S3
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      ref_name: ${{ steps.ref.outputs.ref_name }}
+      verified_sha256: ${{ steps.verify.outputs.verified_sha256 }}
+    permissions:
+      id-token: write   # OIDC -> enscrive-releases-publisher for the S3 upload
+      contents: read
+    steps:
+      - name: Resolve release tag
+        id: ref
+        shell: bash
+        env:
+          # The dispatch input reaches the shell only through env, never
+          # through ${{ }} expansion inside the script (script injection).
+          INPUT_REF_NAME: ${{ github.event.inputs.ref_name }}
+          LC_ALL: C
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            REF_NAME="${INPUT_REF_NAME}"
+            [ "${REF_NAME}" = "${GITHUB_REF_NAME}" ] || fail "ref_name input '${REF_NAME}' differs from the dispatched ref '${GITHUB_REF_NAME}'"
+          else
+            REF_NAME="${GITHUB_REF_NAME}"
+          fi
+          [ "${GITHUB_REF}" = "refs/tags/${REF_NAME}" ] || fail "release must run on tag ref refs/tags/${REF_NAME}, not ${GITHUB_REF}"
+          [[ "${REF_NAME}" =~ ^v[0-9]{8}-[0-9]{4}(-[0-9a-f]{7})?$ ]] || fail "release ref '${REF_NAME}' is not vYYYYMMDD-HHMM[-sha7]"
+          echo "ref_name=${REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Release ref resolved to: ${REF_NAME}"
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: enscrive-docs-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify the binary against the SHA256 the build recorded
+        id: verify
+        shell: bash
+        env:
+          LC_ALL: C
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          SHA_FILES=(dist/*.sha256)
+          if [ "${#SHA_FILES[@]}" -eq 0 ]; then
+            echo "::error::no SHA256 files were downloaded"
+            exit 1
+          fi
+          : > verified-targets.txt
+          VERIFIED_LINES=()
+          for SHA_FILE in "${SHA_FILES[@]}"; do
+            FILE="$(basename "${SHA_FILE%.sha256}")"
+            PREFIX="${BINARY_NAME}-"
+            if [[ "${FILE}" != "${PREFIX}"* ]]; then
+              echo "::error::SHA256 filename does not start with ${PREFIX}: ${FILE}"
+              exit 1
+            fi
+            TARGET="${FILE#"${PREFIX}"}"
+            if [[ ! "${TARGET}" =~ ^[a-z0-9_]+(-[a-z0-9_]+)+$ ]]; then
+              echo "::error::invalid target in SHA256 filename: ${TARGET}"
+              exit 1
+            fi
+            mapfile -t RECORDS < "${SHA_FILE}" || {
+              echo "::error::could not read SHA256 file: ${SHA_FILE}"
+              exit 1
+            }
+            if [ "${#RECORDS[@]}" -ne 1 ]; then
+              echo "::error::SHA256 file must contain exactly one line: ${SHA_FILE}"
+              exit 1
+            fi
+            LINE="${RECORDS[0]}"
+            HASH="${LINE:0:64}"
+            if [[ ! "${HASH}" =~ ^[0-9a-f]{64}$ ]] || [ "${LINE}" != "${HASH}  ${FILE}" ]; then
+              echo "::error::invalid SHA256 record for target ${TARGET}"
+              exit 1
+            fi
+            if [ ! -f "dist/${FILE}" ]; then
+              echo "::error::binary missing for target ${TARGET}: dist/${FILE}"
+              exit 1
+            fi
+            ACTUAL="$(sha256sum "dist/${FILE}" | cut -d' ' -f1)" || {
+              echo "::error::could not compute SHA256 for target ${TARGET}"
+              exit 1
+            }
+            if [ "${ACTUAL}" != "${HASH}" ]; then
+              echo "::error::SHA256 mismatch for target ${TARGET}: expected ${HASH}, actual ${ACTUAL}"
+              exit 1
+            fi
+            printf '%s\n' "${TARGET}" >> verified-targets.txt
+            VERIFIED_LINES+=("${LINE}")
+            echo "verified ${TARGET} ${HASH}"
+          done
+          # dist/ holds the downloaded binary and its .sha256 side by side;
+          # every non-.sha256 file must correspond to a verified record.
+          DIST_FILES=(dist/*)
+          for DIST_PATH in "${DIST_FILES[@]}"; do
+            BASE="$(basename "${DIST_PATH}")"
+            [[ "${BASE}" == *.sha256 ]] && continue
+            if [ ! -f "${DIST_PATH}" ]; then
+              echo "::error::unverified file in dist: ${BASE}"
+              exit 1
+            fi
+            if [[ "${BASE}" != "${BINARY_NAME}-"* ]]; then
+              echo "::error::unverified file in dist: ${BASE}"
+              exit 1
+            fi
+            TARGET="${BASE#"${BINARY_NAME}-"}"
+            if ! grep -qxF "${TARGET}" verified-targets.txt; then
+              echo "::error::unverified file in dist: ${BASE}"
+              exit 1
+            fi
+          done
+          { echo "verified_sha256<<VERIFIED_SHA256_EOF"; printf '%s\n' "${VERIFIED_LINES[@]}"; echo "VERIFIED_SHA256_EOF"; } >> "$GITHUB_OUTPUT"
+          echo "Verified SHA256 records:"
+          printf '%s\n' "${VERIFIED_LINES[@]}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload binary to S3
+        shell: bash
+        env:
+          REF_NAME: ${{ steps.ref.outputs.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ ! -s verified-targets.txt ]; then
+            echo "::error::verified-targets.txt is empty"
+            exit 1
+          fi
+          while IFS= read -r TARGET; do
+            aws s3 cp \
+              "dist/${BINARY_NAME}-${TARGET}" \
+              "s3://${S3_BUCKET}/releases/${CHANNEL}/${REF_NAME}/${TARGET}/${BINARY_NAME}" \
+              --cache-control "public, max-age=31536000, immutable"
+            aws s3 cp \
+              "dist/${BINARY_NAME}-${TARGET}.sha256" \
+              "s3://${S3_BUCKET}/releases/${CHANNEL}/${REF_NAME}/${TARGET}/${BINARY_NAME}.sha256" \
+              --cache-control "public, max-age=31536000, immutable"
+          done < verified-targets.txt
+
+  aggregate:
+    name: aggregate + release
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    # DEVIATION from the standard publish/aggregate/sign template: aggregate
+    # also creates the GitHub Release (softprops/action-gh-release), which
+    # needs contents: write on this job's token. It is the only job in this
+    # workflow with a broader-than-id-token/contents:read permission set.
+    # It never executes build's output: it writes SHA256SUMS from publish's
+    # verified digests and re-downloads the build artifact only to attach it
+    # to the GitHub Release as a file.
+    permissions:
+      id-token: write   # OIDC for the SHA256SUMS upload and CloudFront invalidation
+      contents: write   # softprops/action-gh-release needs this to create the release
+    env:
+      REF_NAME: ${{ needs.publish.outputs.ref_name }}
+      VERIFIED_SHA256: ${{ needs.publish.outputs.verified_sha256 }}
+      LC_ALL: C
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: Download all build artifacts
+      - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
+          pattern: enscrive-docs-*
           path: artifacts
+          merge-multiple: true
 
-      - name: Flatten artifacts and produce SHA256SUMS
+      - name: Flatten build artifact for the GitHub Release
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
           find artifacts -type f -name "${BINARY_NAME}-*" ! -name "*.sha256" -exec cp {} dist/ \;
           ls -lh dist/
-          cd dist
-          : > SHA256SUMS
-          for f in ${BINARY_NAME}-*; do
-            [[ "$f" == *.sha256 ]] && continue
-            [[ "$f" == "SHA256SUMS" ]] && continue
-            sha256sum "$f" >> SHA256SUMS
+
+      - name: Assemble SHA256SUMS from verified digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${REF_NAME}" =~ ^v[0-9]{8}-[0-9]{4}(-[0-9a-f]{7})?$ ]] || { echo "::error::invalid release ref '${REF_NAME}'"; exit 1; }
+          mapfile -t LINES < <(printf '%s' "${VERIFIED_SHA256}")
+          if [ "${#LINES[@]}" -eq 0 ]; then
+            echo "::error::publish provided no verified SHA256 lines"
+            exit 1
+          fi
+          RECORD_RE="^[0-9a-f]{64}  ${BINARY_NAME}-[a-z0-9_]+(-[a-z0-9_]+)+$"
+          for LINE in "${LINES[@]}"; do
+            if [[ ! "${LINE}" =~ ${RECORD_RE} ]]; then
+              echo "::error::invalid verified SHA256 record: ${LINE}"
+              exit 1
+            fi
           done
-          cat SHA256SUMS
+          # Lines come directly from publish's verified output, not from
+          # re-hashing the re-downloaded artifact.
+          printf '%s\n' "${LINES[@]}" > dist/SHA256SUMS
+          echo "Assembled SHA256SUMS:"
+          cat dist/SHA256SUMS
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -173,8 +345,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          CANONICAL_KEY="releases/${CHANNEL}/${TAG}/${BINARY_NAME}/SHA256SUMS"
+          CANONICAL_KEY="releases/${CHANNEL}/${REF_NAME}/${BINARY_NAME}/SHA256SUMS"
 
           # The binary-name segment makes this checksum index unambiguous when
           # independently tagged repositories choose the same minute-based tag.
@@ -188,25 +359,23 @@ jobs:
           # do not consume this shared checksum key.
           aws s3 cp \
             dist/SHA256SUMS \
-            "s3://${S3_BUCKET}/releases/${CHANNEL}/${TAG}/SHA256SUMS" \
+            "s3://${S3_BUCKET}/releases/${CHANNEL}/${REF_NAME}/SHA256SUMS" \
             --cache-control "public, max-age=31536000, immutable"
 
       - name: Invalidate CloudFront
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
           aws cloudfront create-invalidation \
             --distribution-id "${CF_DISTRIBUTION_ID}" \
-            --paths "/releases/${CHANNEL}/${TAG}/*"
+            --paths "/releases/${CHANNEL}/${REF_NAME}/*"
 
       - name: Determine prerelease flag
         id: prerelease
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          if [[ "$TAG" == *-alpha* || "$TAG" == *-beta* || "$TAG" == *-rc* ]]; then
+          if [[ "${REF_NAME}" == *-alpha* || "${REF_NAME}" == *-beta* || "${REF_NAME}" == *-rc* ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
@@ -215,17 +384,17 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          tag_name: ${{ needs.publish.outputs.ref_name }}
+          name: ${{ needs.publish.outputs.ref_name }}
           prerelease: ${{ steps.prerelease.outputs.prerelease }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
             ## Verification
 
-            Checksums: `curl -fsSL https://dev.enscrive.io/releases/dev/${{ github.ref_name }}/enscrive-docs/SHA256SUMS | sha256sum -c --ignore-missing`
+            Checksums: `curl -fsSL https://dev.enscrive.io/releases/dev/${{ needs.publish.outputs.ref_name }}/enscrive-docs/SHA256SUMS | sha256sum -c --ignore-missing`
 
-            Signature bundle: `https://dev.enscrive.io/releases/dev/${{ github.ref_name }}/x86_64-unknown-linux-gnu/enscrive-docs.bundle`
+            Signature bundle: `https://dev.enscrive.io/releases/dev/${{ needs.publish.outputs.ref_name }}/x86_64-unknown-linux-gnu/enscrive-docs.bundle`
           files: |
             dist/enscrive-docs-*
             dist/SHA256SUMS
@@ -235,34 +404,35 @@ jobs:
   # The binary bundle is required. The signed, repository-scoped SHA256SUMS is
   # the canonical human checksum index; the shared checksum key remains only
   # as a compatibility alias because minute-based tags can coincide by repo.
+  # sign re-verifies every object it downloads against the digests publish
+  # verified, and the downloaded SHA256SUMS against the same lines, before
+  # signing anything.
   # ---------------------------------------------------------------------------
   sign:
     name: cosign keyless signing
-    needs: [build, aggregate]
+    needs: [build, publish, aggregate]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # Vendored from enscrive-runners because this public repository cannot
-      # resolve an action from that private repository. The retry, digest pin,
-      # and verified-cache behavior matches the fleet's canonical installer;
-      # keep the digest table synchronized through reviewed changes.
-      - name: Restore cached cosign binary (unverified at this point)
-        id: cache-restore
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/.cosign-verified/cosign
-          key: cosign-verified-v2.5.2-${{ runner.os }}-${{ runner.arch }}
-      - name: "Install cosign (ENS-1177 pattern, vendored: verify cache or fetch with retries + digest pin)"
+      # Vendored from enscrive-runners/.github/actions/install-cosign-verified
+      # (canonical f6950e1, "never restore a cache inside signing jobs") because
+      # this public repository cannot resolve an action from that private
+      # repository; enscrive-cli vendors the same step. There is deliberately
+      # no actions/cache step here: this job holds id-token: write, a tag run
+      # can restore main-scoped cache entries, and a crafted cache archive can
+      # write files anywhere the runner user can (for example into downloaded
+      # action code) before any digest check runs. cosign is fetched on every
+      # run into a fresh mktemp file with retries and installed outside the
+      # checkout only after it matches the pinned sha256. Keep the digest table
+      # synchronized with the canonical copy through reviewed changes.
+      - name: "Install cosign (ENS-1177 pattern, vendored: fetch with retries + digest pin)"
         shell: bash
         env:
           COSIGN_VERSION: v2.5.2
-          INSTALL_DIR: ${{ github.workspace }}/.cosign-verified
+          INSTALL_DIR: ${{ runner.temp }}/cosign-verified
           RUNNER_OS_IN: ${{ runner.os }}
           RUNNER_ARCH_IN: ${{ runner.arch }}
         run: |
@@ -297,16 +467,8 @@ jobs:
             actual=$(sha256sum "$1" | cut -d' ' -f1)
             [[ "${actual}" == "${expected_sha256}" ]]
           }
-          if [[ -f "${target}" ]]; then
-            if verify_sha256 "${target}"; then
-              echo "cache hit: cosign ${COSIGN_VERSION} (${platform}) verified — no network fetch needed."
-              chmod +x "${target}"
-              echo "${INSTALL_DIR}" >> "${GITHUB_PATH}"
-              exit 0
-            fi
-            echo "::warning::vendored install-cosign-verified: cached binary failed digest verification — discarding."
-            rm -f "${target}"
-          fi
+          download="$(mktemp "${INSTALL_DIR}/.cosign-download.XXXXXX")"
+          trap 'rm -f "${download}"' EXIT
           url="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-${platform}"
           echo "Fetching ${url} ..."
           attempt=0
@@ -315,7 +477,7 @@ jobs:
             --fail --show-error --silent --location \
             --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 90 \
             --connect-timeout 10 --max-time 60 \
-            -o "${target}.download" \
+            -o "${download}" \
             "${url}"; do
             attempt=$((attempt + 1))
             if [[ "${attempt}" -ge "${max_attempts}" ]]; then
@@ -326,12 +488,11 @@ jobs:
             echo "::warning::vendored install-cosign-verified: fetch attempt ${attempt} failed, backing off ${backoff}s..."
             sleep "${backoff}"
           done
-          if ! verify_sha256 "${target}.download"; then
+          if ! verify_sha256 "${download}"; then
             echo "::error::vendored install-cosign-verified: downloaded cosign does NOT match the pinned sha256. Refusing to install. expected=${expected_sha256}"
-            rm -f "${target}.download"
             exit 1
           fi
-          mv "${target}.download" "${target}"
+          mv -T "${download}" "${target}"
           chmod +x "${target}"
           echo "${INSTALL_DIR}" >> "${GITHUB_PATH}"
           echo "cosign ${COSIGN_VERSION} (${platform}) fetched, verified, and installed at ${target}."
@@ -344,17 +505,45 @@ jobs:
 
       - name: Sign required binary and canonical checksum index
         shell: bash
+        env:
+          # the checked tag and verified digests from publish; never
+          # GITHUB_REF_NAME, which is unvalidated.
+          REF_NAME: ${{ needs.publish.outputs.ref_name }}
+          VERIFIED_SHA256: ${{ needs.publish.outputs.verified_sha256 }}
+          LC_ALL: C
         run: |
           set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          [[ "${REF_NAME}" =~ ^v[0-9]{8}-[0-9]{4}(-[0-9a-f]{7})?$ ]] || fail "invalid release ref '${REF_NAME}'"
 
-          TAG="${GITHUB_REF_NAME}"
           TARGET="x86_64-unknown-linux-gnu"
           WORK_DIR="/tmp/cosign-work"
           mkdir -p "${WORK_DIR}"
 
-          BINARY_KEY="releases/${CHANNEL}/${TAG}/${TARGET}/${BINARY_NAME}"
+          mapfile -t LINES < <(printf '%s' "${VERIFIED_SHA256}")
+          [ "${#LINES[@]}" -gt 0 ] || fail "publish supplied no verified SHA256 lines"
+          declare -A EXPECTED=()
+          for LINE in "${LINES[@]}"; do
+            HASH="${LINE:0:64}"
+            [[ "${HASH}" =~ ^[0-9a-f]{64}$ ]] || fail "malformed verified SHA256 digest"
+            [ "${LINE:64:2}" = "  " ] || fail "malformed verified SHA256 separator"
+            NAME="${LINE:66}"
+            [ -n "${NAME}" ] || fail "verified SHA256 record has an empty filename"
+            [[ "${NAME}" =~ ^${BINARY_NAME}-[a-z0-9_]+(-[a-z0-9_]+)+$ ]] || fail "malformed verified SHA256 filename '${NAME}'"
+            [ -z "${EXPECTED[${NAME}]+present}" ] || fail "duplicate verified SHA256 filename '${NAME}'"
+            EXPECTED["${NAME}"]="${LINE}"
+          done
+          [ "${#EXPECTED[@]}" -eq 1 ] || fail "verified SHA256 filename set does not match signing targets"
+          EXPECTED_NAME="${BINARY_NAME}-${TARGET}"
+          [ -n "${EXPECTED[${EXPECTED_NAME}]+present}" ] || fail "missing verified SHA256 record for ${EXPECTED_NAME}"
+
+          BINARY_KEY="releases/${CHANNEL}/${REF_NAME}/${TARGET}/${BINARY_NAME}"
           BINARY_LOCAL="${WORK_DIR}/${BINARY_NAME}-${TARGET}"
+          echo "Downloading s3://${S3_BUCKET}/${BINARY_KEY} ..."
           aws s3 cp "s3://${S3_BUCKET}/${BINARY_KEY}" "${BINARY_LOCAL}"
+          EXPECTED_LINE="${EXPECTED[${EXPECTED_NAME}]}"
+          (cd "${WORK_DIR}" && printf '%s\n' "${EXPECTED_LINE}" | sha256sum --check --strict -) || fail "S3 object ${BINARY_KEY} does not match the digest publish verified"
+
           cosign sign-blob \
             --yes \
             --bundle "${BINARY_LOCAL}.bundle" \
@@ -369,9 +558,12 @@ jobs:
             "s3://${S3_BUCKET}/${BINARY_KEY}.bundle" \
             --cache-control "public, max-age=31536000, immutable"
 
-          SUMS_KEY="releases/${CHANNEL}/${TAG}/${BINARY_NAME}/SHA256SUMS"
+          SUMS_KEY="releases/${CHANNEL}/${REF_NAME}/${BINARY_NAME}/SHA256SUMS"
           SUMS_LOCAL="${WORK_DIR}/SHA256SUMS"
+          echo "Downloading s3://${S3_BUCKET}/${SUMS_KEY} ..."
           aws s3 cp "s3://${S3_BUCKET}/${SUMS_KEY}" "${SUMS_LOCAL}"
+          cmp -s <(printf '%s\n' "${LINES[@]}") "${SUMS_LOCAL}" || fail "downloaded SHA256SUMS differs from the lines publish verified"
+
           cosign sign-blob \
             --yes \
             --bundle "${SUMS_LOCAL}.bundle" \
@@ -403,13 +595,15 @@ jobs:
   # ---------------------------------------------------------------------------
   notify-orchestrator:
     name: notify release orchestrator (ENS-538)
-    needs: [build, aggregate, sign]
+    needs: [build, publish, aggregate, sign]
     runs-on: ubuntu-latest
     if: success()
     steps:
       - name: Dispatch release-published to orchestrator
         env:
           ORCHESTRATOR_PAT: ${{ secrets.ENSCRIVE_ORCHESTRATOR_PAT }}
+          REF_NAME: ${{ needs.publish.outputs.ref_name }}
+          LC_ALL: C
         run: |
           set -euo pipefail
           if [ -z "${ORCHESTRATOR_PAT}" ]; then
@@ -417,24 +611,11 @@ jobs:
             echo "Set the secret per ENS-538 to enable auto-publish."
             exit 1
           fi
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            REF_NAME="${{ github.event.inputs.ref_name }}"
-          else
-            REF_NAME="${GITHUB_REF_NAME}"
-          fi
+          [[ "${REF_NAME}" =~ ^v[0-9]{8}-[0-9]{4}(-[0-9a-f]{7})?$ ]] || { echo "::error::invalid release ref '${REF_NAME}'"; exit 1; }
           REPO="${GITHUB_REPOSITORY##*/}"
           echo "Notifying orchestrator: repo=${REPO} version=${REF_NAME}"
-          GH_TOKEN="${ORCHESTRATOR_PAT}" gh api -X POST \
-            repos/enscrive/enscrive-cli/dispatches \
-            --input - <<EOF
-          {
-            "event_type": "release-published",
-            "client_payload": {
-              "repo": "${REPO}",
-              "version": "${REF_NAME}"
-            }
-          }
-          EOF
+          PAYLOAD="$(jq -n --arg repo "${REPO}" --arg version "${REF_NAME}" '{event_type: "release-published", client_payload: {repo: $repo, version: $version}}')"
+          printf '%s\n' "${PAYLOAD}" | GH_TOKEN="${ORCHESTRATOR_PAT}" gh api -X POST repos/enscrive/enscrive-cli/dispatches --input -
           echo "Notification dispatched."
 
   # ---------------------------------------------------------------------------
@@ -443,11 +624,12 @@ jobs:
   # enscrive-probe frozen on v20260619-2225, nothing alerted). This job files
   # (or comments on) a GitHub issue whenever a required job in this workflow
   # fails, so a broken release surfaces instead of rotting quietly.
+  # A cancelled release job alerts like a failure.
   # ---------------------------------------------------------------------------
   notify-on-failure:
     name: alert on release failure (ENS-1177)
-    needs: [build, aggregate, sign, notify-orchestrator]
-    if: failure()
+    needs: [build, publish, aggregate, sign, notify-orchestrator]
+    if: ${{ failure() || cancelled() || contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -455,12 +637,28 @@ jobs:
       - name: File or update release-failure issue
         env:
           GH_TOKEN: ${{ github.token }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          AGGREGATE_RESULT: ${{ needs.aggregate.result }}
+          SIGN_RESULT: ${{ needs.sign.result }}
+          NOTIFY_RESULT: ${{ needs.notify-orchestrator.result }}
+          PUBLISHED_REF: ${{ needs.publish.outputs.ref_name }}
+          WORKFLOW_REF_NAME: ${{ github.ref_name }}
+          LC_ALL: C
         run: |
           set -euo pipefail
           REPO="${GITHUB_REPOSITORY}"
           RUN_URL="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
-          REF="${GITHUB_REF_NAME}"
+          REF="${PUBLISHED_REF}"
+          if [ -z "${REF}" ]; then
+            if [[ "${WORKFLOW_REF_NAME}" =~ ^v[0-9]{8}-[0-9]{4}(-[0-9a-f]{7})?$ ]]; then
+              REF="${WORKFLOW_REF_NAME}"
+            else
+              REF="unresolved-ref"
+            fi
+          fi
           TITLE="release failed: ${REF}"
+          RESULTS="build=${BUILD_RESULT}, publish=${PUBLISH_RESULT}, aggregate=${AGGREGATE_RESULT}, sign=${SIGN_RESULT}, notify-orchestrator=${NOTIFY_RESULT}"
 
           gh label create "release-failure" --repo "${REPO}" \
             --color "B60205" \
@@ -470,14 +668,16 @@ jobs:
           EXISTING=$(gh issue list --repo "${REPO}" --label "release-failure" --state open \
             --search "in:title \"${TITLE}\"" --json number --jq '.[0].number // empty')
 
-          BODY="Release workflow failed for \`${REPO}\` on ref \`${REF}\`.
+          BODY="Release workflow failed or was cancelled for \`${REPO}\` on ref \`${REF}\`.
 
           Run: ${RUN_URL}
+
+          Results: ${RESULTS}
 
           Filed automatically by the ENS-1177 release-failure alert job. A prior silent failure (ct-tui cosign fetch SPOF, 2026-07-09) froze enscrive-probe for three weeks with no alert — this exists so that doesn't happen again."
 
           if [ -n "${EXISTING}" ]; then
-            gh issue comment "${EXISTING}" --repo "${REPO}" --body "Recurred: ${RUN_URL}"
+            gh issue comment "${EXISTING}" --repo "${REPO}" --body "Recurred: ${RUN_URL} (${RESULTS})"
             echo "Commented on existing issue #${EXISTING}."
           else
             gh issue create --repo "${REPO}" --title "${TITLE}" --body "${BODY}" --label "release-failure"

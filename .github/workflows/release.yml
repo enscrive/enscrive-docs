@@ -56,12 +56,12 @@ jobs:
             cross: false
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -111,7 +111,7 @@ jobs:
           cat "${BINARY_NAME}-${{ matrix.target }}.sha256"
 
       - name: Upload artifact for publish
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: enscrive-docs-${{ matrix.target }}
           path: |
@@ -159,7 +159,7 @@ jobs:
           echo "Release ref resolved to: ${REF_NAME}"
 
       - name: Download build artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: enscrive-docs-*
           path: dist
@@ -173,6 +173,13 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+          # The download must be flat: a hidden entry or subdirectory could
+          # carry a file that the dist/* checks below never see.
+          UNEXPECTED="$(find dist -mindepth 1 \( -type d -o -name '.*' -o ! -type f \) -print)"
+          if [ -n "${UNEXPECTED}" ]; then
+            echo "::error::unexpected directory, hidden or non-regular entry in dist: ${UNEXPECTED}"
+            exit 1
+          fi
           SHA_FILES=(dist/*.sha256)
           if [ "${#SHA_FILES[@]}" -eq 0 ]; then
             echo "::error::no SHA256 files were downloaded"
@@ -259,7 +266,7 @@ jobs:
           printf '%s\n' "${VERIFIED_LINES[@]}"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -305,12 +312,12 @@ jobs:
       LC_ALL: C
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Download build artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: enscrive-docs-*
           path: artifacts
@@ -321,7 +328,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          find artifacts -type f -name "${BINARY_NAME}-*" ! -name "*.sha256" -exec cp {} dist/ \;
+          # Attach ONLY the files publish verified: each name comes from
+          # publish's verified lines, must exist exactly once at the top level
+          # of the download, and must match its verified digest. Nothing else
+          # from the download (extra, nested or hidden files) is attached.
+          mapfile -t LINES < <(printf '%s' "${VERIFIED_SHA256}")
+          [ "${#LINES[@]}" -gt 0 ] || { echo "::error::publish provided no verified SHA256 lines"; exit 1; }
+          for LINE in "${LINES[@]}"; do
+            [[ "${LINE}" =~ ^[0-9a-f]{64}\ \ ${BINARY_NAME}-[a-z0-9_]+(-[a-z0-9_]+)+$ ]] || { echo "::error::invalid verified SHA256 record: ${LINE}"; exit 1; }
+            NAME="${LINE:66}"
+            [ -f "artifacts/${NAME}" ] && [ ! -L "artifacts/${NAME}" ] || { echo "::error::verified file missing from the download: ${NAME}"; exit 1; }
+            cp "artifacts/${NAME}" "dist/${NAME}"
+          done
+          (cd dist && printf '%s\n' "${LINES[@]}" | sha256sum --strict --check -) || { echo "::error::release asset does not match its verified digest"; exit 1; }
           ls -lh dist/
 
       - name: Assemble SHA256SUMS from verified digests
@@ -348,7 +367,7 @@ jobs:
           cat dist/SHA256SUMS
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -394,7 +413,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.publish.outputs.ref_name }}
           name: ${{ needs.publish.outputs.ref_name }}
@@ -510,7 +529,7 @@ jobs:
           echo "cosign ${COSIGN_VERSION} (${platform}) fetched, verified, and installed at ${target}."
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}

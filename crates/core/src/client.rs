@@ -86,7 +86,13 @@ impl EnscriveClient {
         }
         let response = request.send().await?;
         if response.status().is_redirection() {
-            return Err(redirect_error(&response));
+            return Err(redirect_error(
+                &response,
+                &[
+                    self.api_key.as_str(),
+                    self.embedding_provider_key.as_deref().unwrap_or(""),
+                ],
+            ));
         }
         let status = response.status();
         let text = response.text().await?;
@@ -232,7 +238,13 @@ impl EnscriveClient {
             .send()
             .await?;
         if response.status().is_redirection() {
-            return Err(redirect_error(&response));
+            return Err(redirect_error(
+                &response,
+                &[
+                    self.api_key.as_str(),
+                    self.embedding_provider_key.as_deref().unwrap_or(""),
+                ],
+            ));
         }
         Ok(response.status())
     }
@@ -256,12 +268,20 @@ fn redirect_location_host(response: &reqwest::Response) -> Option<String> {
 }
 
 /// Build the typed error for a 3xx response this client refuses to follow.
-/// Call this BEFORE reading the response body.
-fn redirect_error(response: &reqwest::Response) -> EnscriveError {
+/// Call this BEFORE reading the response body. `credentials` are the live
+/// credentials this client carries (`api_key`, and `embedding_provider_key`
+/// if set) — if the `Location` host happens to contain one of them (e.g. a
+/// misconfigured redirect target echoing it back), the host is redacted to
+/// `<redacted host>` instead.
+fn redirect_error(response: &reqwest::Response, credentials: &[&str]) -> EnscriveError {
+    let mut host = redirect_location_host(response)
+        .unwrap_or_else(|| "an unspecified host".to_string());
+    if credentials.iter().any(|c| !c.is_empty() && host.contains(c)) {
+        host = "<redacted host>".to_string();
+    }
     EnscriveError::Redirected {
         status: response.status(),
-        location_host: redirect_location_host(response)
-            .unwrap_or_else(|| "an unspecified host".to_string()),
+        location_host: host,
     }
 }
 
@@ -339,6 +359,34 @@ mod redirect_tests {
             !target_hit.load(Ordering::SeqCst),
             "redirect target was contacted — X-API-Key may have been resent"
         );
+    }
+
+    /// ENS-6483: if a redirect Location happens to echo the credential back
+    /// (e.g. a misconfigured target), the error must redact the host
+    /// rather than print it — never let the credential value itself reach
+    /// a log or an error message.
+    #[tokio::test]
+    async fn redirect_error_redacts_a_host_that_contains_the_api_key() {
+        let live_key = "test-secret-key-42";
+        let redirect_response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{live_key}.attacker.example/steal\r\nContent-Length: 0\r\n\r\n"
+        );
+        let redirect_hit = Arc::new(AtomicBool::new(false));
+        let redirect_addr = spawn_mock(redirect_response, redirect_hit.clone());
+
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), live_key);
+        let result = client.list_corpora().await;
+
+        match result {
+            Err(EnscriveError::Redirected { location_host, .. }) => {
+                assert_eq!(location_host, "<redacted host>");
+                assert!(
+                    !location_host.contains(live_key),
+                    "the live key leaked into the error message"
+                );
+            }
+            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
     }
 
     #[tokio::test]

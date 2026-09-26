@@ -223,8 +223,10 @@ pub fn redact_excerpt(text: &str, credentials: &[&str], max_chars: usize) -> Str
     out.chars().take(max_chars).collect()
 }
 
-/// Redact decoded JSON strings and credential-shaped object keys in place.
-/// Live credentials apply to string values; object keys use shape rules only.
+/// Redact decoded JSON strings and object keys in place: live credentials
+/// and shape rules apply to both. (This value is only ever serialized into
+/// an error string, never deserialized into a typed struct, so redacting a
+/// key cannot break a schema.)
 pub fn redact_json_value(value: &mut serde_json::Value, credentials: &[&str]) {
     match value {
         serde_json::Value::String(text) => {
@@ -239,7 +241,7 @@ pub fn redact_json_value(value: &mut serde_json::Value, credentials: &[&str]) {
             let old_object = std::mem::take(object);
             for (key, mut value) in old_object {
                 redact_json_value(&mut value, credentials);
-                let key = redact_excerpt(&key, &[], usize::MAX);
+                let key = redact_excerpt(&key, credentials, usize::MAX);
                 object.insert(key, value);
             }
         }
@@ -250,6 +252,16 @@ pub fn redact_json_value(value: &mut serde_json::Value, credentials: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redact_json_value_redacts_live_credential_used_as_object_key() {
+        let live = format!("{}-{}", "zz-live-cred", "42");
+        let mut value: serde_json::Value =
+            serde_json::from_str(r#"{"zz-live-cred-\u0034\u0032":"invalid"}"#).unwrap();
+        redact_json_value(&mut value, &[live.as_str()]);
+        let out = value.to_string();
+        assert!(!out.contains(&live), "live credential key leaked: {out}");
+    }
 
     /// ENS-6483 (Sol round 4, M2 — the bug ctt's redact.rs and this
     /// crate's client.rs shared before this fix): an `enscrive_<8 hex>_`

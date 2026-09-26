@@ -205,7 +205,7 @@ fn merge_spans(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
 /// redirect's body must never be read at all, but a 4xx/5xx body, a
 /// parse-failure message, or a decoded upstream field (a job's
 /// `error_message`, say) can otherwise echo a credential straight back.
-pub(crate) fn redact_excerpt(text: &str, credentials: &[&str], max_chars: usize) -> String {
+pub fn redact_excerpt(text: &str, credentials: &[&str], max_chars: usize) -> String {
     let lower = text.to_ascii_lowercase();
     let mut spans = credential_spans(&lower, credentials);
     spans.extend(shape_spans(&lower));
@@ -241,7 +241,11 @@ mod tests {
     #[test]
     fn redact_excerpt_redacts_the_whole_enscrive_token_not_just_its_shape_prefix() {
         let token = "enscrive_deadbeef_qrstuvwxyzabc";
-        assert_eq!(token.len(), 31, "fixture must stay under the 32-char opaque-run threshold");
+        assert_eq!(
+            token.len(),
+            31,
+            "fixture must stay under the 32-char opaque-run threshold"
+        );
         let text = format!("upstream said: invalid key {token} for this request");
         let out = redact_excerpt(&text, &[], 200);
         assert!(!out.contains(token), "the full token leaked into: {out}");
@@ -250,6 +254,9 @@ mod tests {
             "the token's suffix (the actual secret material past the \
              enscrive_<8 hex>_ shape) leaked into: {out}"
         );
-        assert!(out.contains("[redacted]"), "expected a redaction marker: {out}");
+        assert!(
+            out.contains("[redacted]"),
+            "expected a redaction marker: {out}"
+        );
     }
 }

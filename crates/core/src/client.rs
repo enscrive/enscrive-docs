@@ -282,10 +282,15 @@ fn redirect_location_host(response: &reqwest::Response) -> Option<String> {
         .get(reqwest::header::LOCATION)?
         .to_str()
         .ok()?;
-    let url = reqwest::Url::parse(raw)
-        .or_else(|_| response.url().join(raw))
-        .ok()?;
-    url.host_str().map(str::to_string)
+    joined_redirect_location_host(response.url(), raw)
+}
+
+fn joined_redirect_location_host(request_url: &reqwest::Url, raw_location: &str) -> Option<String> {
+    request_url
+        .join(raw_location)
+        .ok()?
+        .host_str()
+        .map(str::to_string)
 }
 
 /// Build the typed error for a 3xx response this client refuses to follow.
@@ -332,6 +337,16 @@ mod redirect_tests {
     use std::net::TcpListener as StdTcpListener;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn redirect_location_with_matching_scheme_joins_request_url() {
+        let request_url =
+            reqwest::Url::parse("http://origin.example/v1/corpora").expect("valid request URL");
+        assert_eq!(
+            joined_redirect_location_host(&request_url, "http:next").as_deref(),
+            Some("origin.example")
+        );
+    }
 
     /// Spawn a mock HTTP server on a background thread. It accepts
     /// connections (one per call unless `repeat` is true), counts them
@@ -437,7 +452,10 @@ mod redirect_tests {
             err.starts_with("refusing to follow HTTP 307 redirect to ordinary.example"),
             "expected the spec's exact phrase, got: {err}"
         );
-        assert!(!err.contains("Temporary Redirect"), "reason phrase leaked: {err}");
+        assert!(
+            !err.contains("Temporary Redirect"),
+            "reason phrase leaked: {err}"
+        );
     }
 
     /// Proves the fixture in the test above is not just silently
@@ -637,13 +655,15 @@ mod redirect_tests {
                 Err(EnscriveError::Redirected { location_host, .. }) => {
                     if expect_redacted {
                         assert_eq!(
-                            location_host, "<redacted host>",
+                            location_host,
+                            "<redacted host>",
                             "a run of {} chars should be redacted",
                             run.len()
                         );
                     } else {
                         assert_eq!(
-                            location_host, host,
+                            location_host,
+                            host,
                             "a run of {} chars should stay named",
                             run.len()
                         );
@@ -753,10 +773,7 @@ mod redirect_tests {
         let result = client.list_corpora().await;
 
         match result {
-            Err(EnscriveError::Http {
-                status,
-                body: msg,
-            }) => {
+            Err(EnscriveError::Http { status, body: msg }) => {
                 assert_eq!(status.as_u16(), 400);
                 assert!(
                     !msg.contains(live_api_key),

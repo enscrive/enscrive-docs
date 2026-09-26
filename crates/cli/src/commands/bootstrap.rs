@@ -6,6 +6,7 @@
 
 use crate::global::GlobalArgs;
 use clap::Args;
+use enscrive_docs_core::redact::redact_excerpt;
 use enscrive_docs_core::{
     Config, CreateCorpusRequest, CreateVoiceApiRequest, EnscriveClient, VoiceConfigApi,
 };
@@ -45,7 +46,12 @@ pub async fn run(global: GlobalArgs, args: BootstrapArgs) -> Result<(), String> 
         .map_err(|e| e.to_string())?;
     let endpoint = cfg.resolved_endpoint(global.endpoint.as_deref());
     let provider_key = cfg.resolved_provider_key(global.embedding_provider_key.as_deref());
+    let live_credentials = vec![api_key.clone(), provider_key.clone().unwrap_or_default()];
     let client = EnscriveClient::with_provider_key(endpoint, api_key, provider_key);
+    let credentials = live_credentials
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
 
     // ---- Voices ----
     println!("bootstrap: reconciling voices");
@@ -56,7 +62,11 @@ pub async fn run(global: GlobalArgs, args: BootstrapArgs) -> Result<(), String> 
         .collect();
     for voice_cfg in &cfg.voices {
         if let Some(id) = voice_by_name.get(&voice_cfg.name) {
-            println!("  [skip] voice \"{}\" already exists ({})", voice_cfg.name, id);
+            println!(
+                "  [skip] voice \"{}\" already exists ({})",
+                voice_cfg.name,
+                redact_excerpt(id, &credentials, 200)
+            );
             continue;
         }
         let api_cfg = VoiceConfigApi {
@@ -74,8 +84,18 @@ pub async fn run(global: GlobalArgs, args: BootstrapArgs) -> Result<(), String> 
                 config: api_cfg,
             })
             .await
-            .map_err(|e| format!("create voice \"{}\": {e}", voice_cfg.name))?;
-        println!("  [create] voice \"{}\" -> {}", created.name, created.id);
+            .map_err(|e| {
+                format!(
+                    "create voice \"{}\": {}",
+                    voice_cfg.name,
+                    redact_excerpt(&e.to_string(), &credentials, 200)
+                )
+            })?;
+        println!(
+            "  [create] voice \"{}\" -> {}",
+            redact_excerpt(&created.name, &credentials, 200),
+            redact_excerpt(&created.id, &credentials, 200)
+        );
     }
 
     // ---- Corpora ----
@@ -89,7 +109,8 @@ pub async fn run(global: GlobalArgs, args: BootstrapArgs) -> Result<(), String> 
         if let Some(id) = corpus_by_name.get(&corpus_cfg.name) {
             println!(
                 "  [skip] corpus \"{}\" already exists ({})",
-                corpus_cfg.name, id
+                corpus_cfg.name,
+                redact_excerpt(id, &credentials, 200)
             );
             continue;
         }
@@ -108,10 +129,18 @@ pub async fn run(global: GlobalArgs, args: BootstrapArgs) -> Result<(), String> 
                 dimensions: corpus_cfg.dimensions,
             })
             .await
-            .map_err(|e| format!("create corpus \"{}\": {e}", corpus_cfg.name))?;
+            .map_err(|e| {
+                format!(
+                    "create corpus \"{}\": {}",
+                    corpus_cfg.name,
+                    redact_excerpt(&e.to_string(), &credentials, 200)
+                )
+            })?;
         println!(
             "  [create] corpus \"{}\" -> {} (model: {})",
-            created.name, created.id, created.model
+            redact_excerpt(&created.name, &credentials, 200),
+            redact_excerpt(&created.id, &credentials, 200),
+            redact_excerpt(&created.model, &credentials, 200)
         );
     }
 

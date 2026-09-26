@@ -102,44 +102,38 @@ pub async fn await_job_terminal<P: JobPoller>(
                             // credentials plus the shape rules, and bound
                             // like every other non-redirect error excerpt
                             // in the fleet, before it's ever displayed.
-                            let reason = crate::redact::redact_excerpt(&reason, credentials, 200);
-                            Err(EnscriveError::Other(format!(
-                                "ingest job {job_id} {}: {reason}",
-                                job.status
-                            )))
+                            Err(polling_error(
+                                format!("ingest job {job_id} {}: {reason}", job.status),
+                                credentials,
+                            ))
                         }
                     };
                 }
 
                 if std::time::Instant::now() >= deadline {
-                    // ENS-6483 (Sol round 3, H sweep): unlike the Failed
-                    // branch above (`job.status` there is one of exactly
-                    // two literal strings, `classify_status`'s own match
-                    // arms), a NON-terminal status is an open-ended
-                    // upstream-controlled string — redact it too.
-                    let status = crate::redact::redact_excerpt(&job.status, credentials, 200);
-                    return Err(EnscriveError::Other(format!(
-                        "timed out after {}s polling ingest job {job_id} (last status: {status})",
-                        cfg.timeout.as_secs(),
-                    )));
+                    return Err(polling_error(
+                        format!(
+                            "timed out after {}s polling ingest job {job_id} (last status: {})",
+                            cfg.timeout.as_secs(),
+                            job.status,
+                        ),
+                        credentials,
+                    ));
                 }
             }
             Err(e) => {
                 if std::time::Instant::now() >= deadline {
-                    // `e` is this crate's own EnscriveError from
-                    // get_job_status (a send_typed() call) — its Display
-                    // is already redacted by send_typed's own fixes, so
-                    // only `last_status` (the same open-ended field as
-                    // above) needs redacting here.
-                    let last_status = crate::redact::redact_excerpt(&last_status, credentials, 200);
-                    return Err(EnscriveError::Other(if had_success_response {
-                        format!(
-                            "poll failed after timeout for ingest job {job_id} \
+                    return Err(polling_error(
+                        if had_success_response {
+                            format!(
+                                "poll failed after timeout for ingest job {job_id} \
                              (last status: {last_status}): {e}"
-                        )
-                    } else {
-                        format!("poll failed after timeout for ingest job {job_id}: {e}")
-                    }));
+                            )
+                        } else {
+                            format!("poll failed after timeout for ingest job {job_id}: {e}")
+                        },
+                        credentials,
+                    ));
                 }
             }
         }
@@ -147,6 +141,13 @@ pub async fn await_job_terminal<P: JobPoller>(
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(cfg.max_delay);
     }
+}
+
+/// Redact the complete polling error after interpolation so every decoded
+/// upstream value (including the launch `job_id` and nested error text) is
+/// covered by the same 200 character bound and shape rules.
+fn polling_error(message: String, credentials: &[&str]) -> EnscriveError {
+    EnscriveError::Other(crate::redact::redact_excerpt(&message, credentials, 200))
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -234,11 +235,7 @@ mod tests {
 
     #[tokio::test]
     async fn pending_then_running_then_complete() {
-        let poller = ScriptedPoller::new(vec![
-            job("pending"),
-            job("running"),
-            job("completed"),
-        ]);
+        let poller = ScriptedPoller::new(vec![job("pending"), job("running"), job("completed")]);
         let (kind, result) = await_job_terminal(&poller, "abc", fast_cfg(), &[])
             .await
             .expect("expected success");
@@ -276,7 +273,25 @@ mod tests {
             .expect_err("expected failure");
         let msg = err.to_string();
         assert!(!msg.contains(live_key), "the live key leaked into: {msg}");
-        assert!(msg.contains("[redacted]"), "expected a redaction marker: {msg}");
+        assert!(
+            msg.contains("[redacted]"),
+            "expected a redaction marker: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_status_redacts_a_live_credential_echoed_as_job_id() {
+        let live_key = format!("{}{}", "sk-ant-api03-", "abcdefghijklmnop");
+        let poller = ScriptedPoller::new(vec![job("failed")]);
+        let err = await_job_terminal(&poller, &live_key, fast_cfg(), &[&live_key])
+            .await
+            .expect_err("expected failure");
+        let msg = err.to_string();
+        assert!(!msg.contains(&live_key), "the live key leaked into: {msg}");
+        assert!(
+            msg.contains("[redacted]"),
+            "expected a redaction marker: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -300,5 +315,25 @@ mod tests {
             .await
             .expect_err("expected timeout");
         assert!(err.to_string().contains("timed out"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn timeout_redacts_a_live_credential_echoed_as_job_id() {
+        let live_key = format!("{}{}", "sk-ant-api03-", "abcdefghijklmnop");
+        let poller = ScriptedPoller::new(vec![job("pending")]);
+        let cfg = PollConfig {
+            initial_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(1),
+            timeout: std::time::Duration::from_millis(5),
+        };
+        let err = await_job_terminal(&poller, &live_key, cfg, &[&live_key])
+            .await
+            .expect_err("expected timeout");
+        let msg = err.to_string();
+        assert!(!msg.contains(&live_key), "the live key leaked into: {msg}");
+        assert!(
+            msg.contains("[redacted]"),
+            "expected a redaction marker: {msg}"
+        );
     }
 }

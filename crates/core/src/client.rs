@@ -278,10 +278,19 @@ fn redirect_error(response: &reqwest::Response, credentials: &[&str]) -> Enscriv
 
 /// Best-effort, dependency-free detection of a credential-shaped substring
 /// in an already-lowercased hostname: a common provider/platform-key
-/// prefix (including this product's own `enscrive_` key prefix), or a run
-/// of 24+ consecutive token-alphabet characters within one DNS label
-/// (ordinary hostname labels don't run that long without a `.` or `-`
-/// break; a bearer/API-key value typically does).
+/// prefix (including this product's own `enscrive_` key prefix) at the
+/// START of a DNS label, or a run of 24+ consecutive `[a-z0-9_]`
+/// characters within one label (ordinary hostname labels don't run that
+/// long without a `.` or `-` break; a bearer/API-key value typically
+/// does).
+///
+/// Both checks are anchored to a *label*, not matched as a bare substring
+/// anywhere in the host: an ALB name like
+/// `my-keycloak-loadbalancer-1234567890.us-east-1.elb.amazonaws.com` or a
+/// host like `network-edge.example.com` must NOT be redacted just because
+/// `rk-` (from "wo**rk-**edge"/"...**rk-**loadbalancer") appears mid-word,
+/// and hyphens must break a run the same way dots do (an ordinary
+/// hyphenated hostname can easily exceed 24 total alnum characters).
 fn host_looks_credential_shaped(host_lower: &str) -> bool {
     const KEY_PREFIXES: &[&str] = &[
         "enscrive_",
@@ -299,18 +308,22 @@ fn host_looks_credential_shaped(host_lower: &str) -> bool {
         "ghs_",
         "xox",
     ];
-    if KEY_PREFIXES.iter().any(|p| host_lower.contains(p)) {
-        return true;
-    }
-    let mut run = 0usize;
-    for c in host_lower.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-            run += 1;
-            if run >= 24 {
-                return true;
+    for label in host_lower.split('.') {
+        if KEY_PREFIXES.iter().any(|p| label.starts_with(p)) {
+            return true;
+        }
+        let mut run = 0usize;
+        for c in label.chars() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                run += 1;
+                if run >= 24 {
+                    return true;
+                }
+            } else {
+                // Includes '-': a hyphen breaks a run exactly like a `.`
+                // label boundary would.
+                run = 0;
             }
-        } else {
-            run = 0;
         }
     }
     false
@@ -513,24 +526,70 @@ mod redirect_tests {
     }
 
     /// A host that merely LOOKS credential-shaped is redacted even when it
-    /// doesn't echo the live key at all.
+    /// doesn't echo the live key at all — both a short host (too short for
+    /// the run-length rule alone to explain, so this exercises KEY_PREFIXES
+    /// specifically) and this product's own `enscrive_` prefix.
     #[tokio::test]
-    async fn redirect_error_redacts_a_known_key_shape() {
-        let redirect_response = "HTTP/1.1 302 Found\r\nLocation: http://sk-ant-FAKEtest-not-a-real-key-shape.attacker.example/steal\r\nContent-Length: 0\r\n\r\n".to_string();
-        let redirect_calls = Arc::new(AtomicUsize::new(0));
-        let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+    async fn redirect_error_redacts_known_key_shapes() {
+        for shaped_host in [
+            "sk-ant-api03-abc.x.example",
+            "enscrive_1a2b3c4d_x.evil.example",
+        ] {
+            let redirect_response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{shaped_host}/steal\r\nContent-Length: 0\r\n\r\n"
+            );
+            let redirect_calls = Arc::new(AtomicUsize::new(0));
+            let redirect_addr = spawn_mock(redirect_response, redirect_calls);
 
-        let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
-        let result = client.list_corpora().await;
+            let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
+            let result = client.list_corpora().await;
 
-        match result {
-            Err(EnscriveError::Redirected { location_host, .. }) => {
-                assert_eq!(
-                    location_host, "<redacted host>",
-                    "expected shape-based redaction"
-                );
+            match result {
+                Err(EnscriveError::Redirected { location_host, .. }) => {
+                    assert_eq!(
+                        location_host, "<redacted host>",
+                        "expected shape-based redaction for {shaped_host}"
+                    );
+                }
+                other => panic!(
+                    "expected Err(EnscriveError::Redirected) for {shaped_host}, got {other:?}"
+                ),
             }
-            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
+    }
+
+    /// An ordinary hyphenated hostname — an ALB name or a plain
+    /// "network-edge"-style host — must NOT be redacted. Before the
+    /// label-anchored/hyphen-breaks-a-run fix, both tripped the heuristic:
+    /// "network-edge" contains "rk-" as a bare substring
+    /// ("netwo**rk-**edge"), and the ALB name's hyphenated segments run
+    /// past 24 alnum characters when hyphens don't break the count.
+    #[tokio::test]
+    async fn redirect_error_does_not_redact_ordinary_hyphenated_hosts() {
+        for ordinary_host in [
+            "my-keycloak-loadbalancer-1234567890.us-east-1.elb.amazonaws.com",
+            "network-edge.example.com",
+        ] {
+            let redirect_response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{ordinary_host}/steal\r\nContent-Length: 0\r\n\r\n"
+            );
+            let redirect_calls = Arc::new(AtomicUsize::new(0));
+            let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+
+            let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
+            let result = client.list_corpora().await;
+
+            match result {
+                Err(EnscriveError::Redirected { location_host, .. }) => {
+                    assert_eq!(
+                        location_host, ordinary_host,
+                        "expected {ordinary_host} to be named, not redacted"
+                    );
+                }
+                other => panic!(
+                    "expected Err(EnscriveError::Redirected) for {ordinary_host}, got {other:?}"
+                ),
+            }
         }
     }
 

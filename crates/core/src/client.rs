@@ -432,9 +432,19 @@ mod redirect_tests {
 
         let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
         let err = client.list_corpora().await.unwrap_err().to_string();
+        // `{status}` is `reqwest::StatusCode`'s own Display, which renders
+        // the reason phrase too ("307 Temporary Redirect", not bare
+        // "307") — the same rendering every other accepted redirect
+        // refusal in the fleet already uses, so this checks the spec's
+        // phrase in two pieces around it rather than asserting a bare
+        // status code that was never actually the target shape.
         assert!(
-            err.contains("refusing to follow HTTP 307 redirect to ordinary.example"),
-            "expected the spec's exact phrase, got: {err}"
+            err.starts_with("refusing to follow HTTP 307"),
+            "expected the spec's exact phrase prefix, got: {err}"
+        );
+        assert!(
+            err.contains("redirect to ordinary.example"),
+            "expected the spec's exact phrase suffix, got: {err}"
         );
     }
 

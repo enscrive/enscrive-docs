@@ -8,6 +8,18 @@ pub enum EnscriveError {
         body: String,
     },
 
+    /// Server responded with an HTTP 3xx redirect. `EnscriveClient`'s http
+    /// client is built with `redirect::Policy::none()` so a redirect is
+    /// never silently followed — doing so would resend `X-API-Key` (and, if
+    /// set, `X-Embedding-Provider-Key`) to whatever host `Location` names.
+    #[error("HTTP {status}: the server redirected this request to {location_host}; Enscrive credentials (X-API-Key / X-Embedding-Provider-Key) are never resent to a redirect target")]
+    Redirected {
+        status: reqwest::StatusCode,
+        /// Host only, never the full URL or query string (which could
+        /// itself carry sensitive data), and never any credential.
+        location_host: String,
+    },
+
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
 

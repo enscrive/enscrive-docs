@@ -17,7 +17,11 @@ pub enum EnscriveError {
     /// exact required phrase, `refusing to follow HTTP <status> redirect
     /// to <host>` — fixed, non-dynamic explanatory text around it is
     /// permitted, but this substring itself must appear verbatim.
-    #[error("refusing to follow HTTP {status} redirect to {location_host}: Enscrive credentials (X-API-Key / X-Embedding-Provider-Key) are never resent to a redirect target")]
+    #[error(
+        "refusing to follow HTTP {} redirect to {}: Enscrive credentials (X-API-Key / X-Embedding-Provider-Key) are never resent to a redirect target",
+        .status.as_u16(),
+        .location_host
+    )]
     Redirected {
         status: reqwest::StatusCode,
         /// Host only, never the full URL or query string (which could

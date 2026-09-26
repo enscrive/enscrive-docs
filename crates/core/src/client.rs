@@ -397,7 +397,21 @@ fn shape_spans(lower: &str) -> Vec<(usize, usize)> {
                 .take_while(char::is_ascii_hexdigit)
                 .count();
             if hex_len == ENSCRIVE_ID_LEN && after.as_bytes().get(ENSCRIVE_ID_LEN) == Some(&b'_') {
-                spans.push((i, i + ENSCRIVE_PREFIX.len() + ENSCRIVE_ID_LEN + 1));
+                let shape_len = ENSCRIVE_PREFIX.len() + ENSCRIVE_ID_LEN + 1;
+                // ENS-6483 (ctt Sol round 4, M2 — ported here too, same
+                // bug): the fixed shape alone is enough to DETECT a
+                // credential (a host-redaction boolean doesn't care how
+                // long the matched span is), but TEXT redaction must
+                // remove the whole token, not just its recognizable
+                // prefix — continue consuming the token's remaining
+                // key-alphabet characters past the shape, so the actual
+                // secret material after "enscrive_<8 hex>_" is covered
+                // too.
+                let extra_len = after[ENSCRIVE_ID_LEN + 1..]
+                    .chars()
+                    .take_while(|&c| is_key_suffix_char(c))
+                    .count();
+                spans.push((i, i + shape_len + extra_len));
             }
         }
 
@@ -425,18 +439,18 @@ fn shape_spans(lower: &str) -> Vec<(usize, usize)> {
             }
             run_len += 1;
         } else {
-            if let Some(start) = run_start.take() {
-                if run_len >= MIN_OPAQUE_RUN_LEN {
-                    spans.push((start, i));
-                }
+            if let Some(start) = run_start.take()
+                && run_len >= MIN_OPAQUE_RUN_LEN
+            {
+                spans.push((start, i));
             }
             run_len = 0;
         }
     }
-    if let Some(start) = run_start {
-        if run_len >= MIN_OPAQUE_RUN_LEN {
-            spans.push((start, cursor));
-        }
+    if let Some(start) = run_start
+        && run_len >= MIN_OPAQUE_RUN_LEN
+    {
+        spans.push((start, cursor));
     }
 
     spans
@@ -822,6 +836,32 @@ mod redirect_tests {
                 other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
             }
         }
+    }
+
+    /// ENS-6483 (ctt Sol round 4, M2 — the same bug applied here too):
+    /// an `enscrive_<8 hex>_` token's SHAPE recognition stops right after
+    /// the fixed prefix+hex+underscore (that's all `host_looks_credential_
+    /// shaped` needs for a boolean check), but the actual secret material
+    /// continues past that point in the real key format — TEXT redaction
+    /// must consume the whole token, not just its recognizable shape
+    /// prefix, or the tail of a real key survives redaction untouched.
+    /// The token is exactly 31 characters total (18 for the shape +
+    /// "qrstuvwxyzabc", 13 more) — one under rule 3's 32-char opaque-run
+    /// threshold, so rule 3 can't be what's silently covering the gap;
+    /// only the fixed-shape span's own length decides this.
+    #[test]
+    fn redact_excerpt_redacts_the_whole_enscrive_token_not_just_its_shape_prefix() {
+        let token = "enscrive_deadbeef_qrstuvwxyzabc";
+        assert_eq!(token.len(), 31, "fixture must stay under the 32-char opaque-run threshold");
+        let text = format!("upstream said: invalid key {token} for this request");
+        let out = redact_excerpt(&text, &[], 200);
+        assert!(!out.contains(token), "the full token leaked into: {out}");
+        assert!(
+            !out.contains("qrstuvwxyzabc"),
+            "the token's suffix (the actual secret material past the \
+             enscrive_<8 hex>_ shape) leaked into: {out}"
+        );
+        assert!(out.contains("[redacted]"), "expected a redaction marker: {out}");
     }
 
     /// An ordinary hyphenated hostname — an ALB name or a plain

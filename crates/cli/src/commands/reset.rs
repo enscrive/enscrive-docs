@@ -6,6 +6,7 @@
 
 use crate::global::GlobalArgs;
 use clap::Args;
+use enscrive_docs_core::redact::redact_excerpt;
 use enscrive_docs_core::{Config, EnscriveClient};
 
 #[derive(Args, Clone, Debug)]
@@ -48,7 +49,12 @@ pub async fn run(global: GlobalArgs, args: ResetArgs) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let endpoint = cfg.resolved_endpoint(global.endpoint.as_deref());
     let provider_key = cfg.resolved_provider_key(global.embedding_provider_key.as_deref());
+    let live_credentials = [api_key.clone(), provider_key.clone().unwrap_or_default()];
     let client = EnscriveClient::with_provider_key(endpoint, api_key, provider_key);
+    let credentials = live_credentials
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
 
     let existing = client.list_corpora().await.map_err(|e| e.to_string())?;
 
@@ -69,12 +75,19 @@ pub async fn run(global: GlobalArgs, args: ResetArgs) -> Result<(), String> {
         };
         println!(
             "[{}] deleting corpus {}…",
-            corpus_cfg.name, existing_entry.id
+            corpus_cfg.name,
+            redact_excerpt(&existing_entry.id, &credentials, 200)
         );
         let resp = client
             .delete_corpus(&existing_entry.id)
             .await
-            .map_err(|e| format!("delete corpus \"{}\": {e}", corpus_cfg.name))?;
+            .map_err(|e| {
+                format!(
+                    "delete corpus \"{}\": {}",
+                    corpus_cfg.name,
+                    redact_excerpt(&e.to_string(), &credentials, 200)
+                )
+            })?;
         if !resp.deleted {
             return Err(format!(
                 "delete corpus \"{}\" returned deleted=false",
@@ -87,9 +100,7 @@ pub async fn run(global: GlobalArgs, args: ResetArgs) -> Result<(), String> {
     if let Some(only) = args.corpus.as_deref()
         && targeted == 0
     {
-        return Err(format!(
-            "--corpus \"{only}\" not found in [[corpora]]"
-        ));
+        return Err(format!("--corpus \"{only}\" not found in [[corpora]]"));
     }
 
     // Recreate + (optionally) re-ingest via bootstrap. Idempotent either way.

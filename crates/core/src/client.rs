@@ -5,6 +5,7 @@
 
 use crate::error::{EnscriveError, Result};
 use crate::jobs_polling::{PollConfig, await_job_terminal};
+use crate::redact::{host_looks_credential_shaped, redact_excerpt, redact_json_value};
 use crate::types::{
     CorpusDetail, CreateCorpusRequest, CreateVoiceApiRequest, DeleteCorpusResponse,
     DeleteVoiceResponse, ImportJobStatus, IngestRequest, IngestSummary, JobLaunchResponse,
@@ -97,12 +98,50 @@ impl EnscriveClient {
         let status = response.status();
         let text = response.text().await?;
         if !status.is_success() {
-            return Err(EnscriveError::Http { status, body: text });
+            // ENS-6483 (Sol round 2, H): a 4xx/5xx body can echo a
+            // credential straight back (e.g. a validation error quoting
+            // the offending X-API-Key/X-Embedding-Provider-Key header
+            // value) — redact with this request's live credentials plus
+            // the shape rules, and bound like every other non-redirect
+            // error excerpt in the fleet, before it ever reaches
+            // EnscriveError::Http.
+            let credentials = [
+                self.api_key.as_str(),
+                self.embedding_provider_key.as_deref().unwrap_or(""),
+            ];
+            let excerpt = match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(mut value) => {
+                    redact_json_value(&mut value, &credentials);
+                    redact_excerpt(&value.to_string(), &[], 200)
+                }
+                Err(_) => redact_excerpt(&text, &credentials, 200),
+            };
+            return Err(EnscriveError::Http {
+                status,
+                body: excerpt,
+            });
         }
         if text.trim().is_empty() {
             return serde_json::from_str("null").map_err(EnscriveError::from);
         }
-        serde_json::from_str(&text).map_err(EnscriveError::from)
+        serde_json::from_str(&text).map_err(|e| {
+            // ENS-6483 (Sol round 3, H): a 2xx whose body doesn't parse
+            // into the expected shape still gets the credential/shape
+            // redaction and 200-char bound — serde_json's own error
+            // Display can quote a snippet of the unexpected value (e.g.
+            // `invalid type: string "…", expected a struct` at a given
+            // line/column), which could otherwise echo a credential this
+            // request carries straight into the error.
+            let excerpt = redact_excerpt(
+                &format!("response parse failed: {e}"),
+                &[
+                    self.api_key.as_str(),
+                    self.embedding_provider_key.as_deref().unwrap_or(""),
+                ],
+                200,
+            );
+            EnscriveError::Other(excerpt)
+        })
     }
 
     // -- Corpora --
@@ -179,6 +218,10 @@ impl EnscriveClient {
             self,
             &launch.job_id,
             PollConfig::waited(DEFAULT_INGEST_POLL_TIMEOUT_SECS),
+            &[
+                self.api_key.as_str(),
+                self.embedding_provider_key.as_deref().unwrap_or(""),
+            ],
         )
         .await?;
         Ok(IngestSummary {
@@ -242,10 +285,15 @@ fn redirect_location_host(response: &reqwest::Response) -> Option<String> {
         .get(reqwest::header::LOCATION)?
         .to_str()
         .ok()?;
-    let url = reqwest::Url::parse(raw)
-        .or_else(|_| response.url().join(raw))
-        .ok()?;
-    url.host_str().map(str::to_string)
+    joined_redirect_location_host(response.url(), raw)
+}
+
+fn joined_redirect_location_host(request_url: &reqwest::Url, raw_location: &str) -> Option<String> {
+    request_url
+        .join(raw_location)
+        .ok()?
+        .host_str()
+        .map(str::to_string)
 }
 
 /// Build the typed error for a 3xx response this client refuses to follow.
@@ -276,46 +324,6 @@ fn redirect_error(response: &reqwest::Response, credentials: &[&str]) -> Enscriv
     }
 }
 
-/// Best-effort, dependency-free detection of a credential-shaped substring
-/// in an already-lowercased hostname: a common provider/platform-key
-/// prefix (including this product's own `enscrive_` key prefix), or a run
-/// of 24+ consecutive token-alphabet characters within one DNS label
-/// (ordinary hostname labels don't run that long without a `.` or `-`
-/// break; a bearer/API-key value typically does).
-fn host_looks_credential_shaped(host_lower: &str) -> bool {
-    const KEY_PREFIXES: &[&str] = &[
-        "enscrive_",
-        "sk-",
-        "sk_",
-        "sk-ant-",
-        "pk-",
-        "rk-",
-        "aiza",
-        "ya29.",
-        "glpat-",
-        "gho_",
-        "ghp_",
-        "ghu_",
-        "ghs_",
-        "xox",
-    ];
-    if KEY_PREFIXES.iter().any(|p| host_lower.contains(p)) {
-        return true;
-    }
-    let mut run = 0usize;
-    for c in host_lower.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-            run += 1;
-            if run >= 24 {
-                return true;
-            }
-        } else {
-            run = 0;
-        }
-    }
-    false
-}
-
 impl crate::jobs_polling::JobPoller for EnscriveClient {
     fn get_job_status(
         &self,
@@ -332,6 +340,16 @@ mod redirect_tests {
     use std::net::TcpListener as StdTcpListener;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn redirect_location_with_matching_scheme_joins_request_url() {
+        let request_url =
+            reqwest::Url::parse("http://origin.example/v1/corpora").expect("valid request URL");
+        assert_eq!(
+            joined_redirect_location_host(&request_url, "http:next").as_deref(),
+            Some("origin.example")
+        );
+    }
 
     /// Spawn a mock HTTP server on a background thread. It accepts
     /// connections (one per call unless `repeat` is true), counts them
@@ -416,6 +434,30 @@ mod redirect_tests {
             target_calls.load(Ordering::SeqCst),
             0,
             "redirect target was contacted — X-API-Key may have been resent"
+        );
+    }
+
+    /// ENS-6483 (Sol round 3, L): the fleet spec's exact required phrase
+    /// must appear verbatim in the Display text — not just an equivalent
+    /// paraphrase — so every repo's redirect refusal is grep-consistent.
+    #[tokio::test]
+    async fn redirected_error_display_contains_the_spec_exact_phrase() {
+        let redirect_calls = Arc::new(AtomicUsize::new(0));
+        let redirect_response =
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://ordinary.example/steal\r\nContent-Length: 0\r\n\r\n"
+                .to_string();
+        let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
+        let err = client.list_corpora().await.unwrap_err().to_string();
+        // The fleet spec requires the NUMERIC status only (no reason phrase).
+        assert!(
+            err.starts_with("refusing to follow HTTP 307 redirect to ordinary.example"),
+            "expected the spec's exact phrase, got: {err}"
+        );
+        assert!(
+            !err.contains("Temporary Redirect"),
+            "reason phrase leaked: {err}"
         );
     }
 
@@ -513,24 +555,174 @@ mod redirect_tests {
     }
 
     /// A host that merely LOOKS credential-shaped is redacted even when it
-    /// doesn't echo the live key at all.
+    /// doesn't echo the live key at all — a shape with enough trailing
+    /// characters (rule 2's generic-prefix branch, kept under 32 total so
+    /// rule 3 can't be what's actually catching it), a boundary-anchored
+    /// shape following a hyphen rather than a label start (the ENS-6483 M
+    /// fix — this escaped the old per-label `starts_with` check), and this
+    /// product's own fixed `enscrive_<8 hex>_` shape.
     #[tokio::test]
-    async fn redirect_error_redacts_a_known_key_shape() {
-        let redirect_response = "HTTP/1.1 302 Found\r\nLocation: http://sk-ant-FAKEtest-not-a-real-key-shape.attacker.example/steal\r\nContent-Length: 0\r\n\r\n".to_string();
+    async fn redirect_error_redacts_known_key_shapes() {
+        for shaped_host in [
+            "sk-ant-api03-abcdefghijklmnop.x.example",
+            "prefix-sk-abcdefghijklmnopqrst.example",
+            "enscrive_1a2b3c4d_x.evil.example",
+        ] {
+            let redirect_response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{shaped_host}/steal\r\nContent-Length: 0\r\n\r\n"
+            );
+            let redirect_calls = Arc::new(AtomicUsize::new(0));
+            let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+
+            let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
+            let result = client.list_corpora().await;
+
+            match result {
+                Err(EnscriveError::Redirected { location_host, .. }) => {
+                    assert_eq!(
+                        location_host, "<redacted host>",
+                        "expected shape-based redaction for {shaped_host}"
+                    );
+                }
+                other => panic!(
+                    "expected Err(EnscriveError::Redirected) for {shaped_host}, got {other:?}"
+                ),
+            }
+        }
+    }
+
+    /// ENS-6483 R1 L1: a key-shape prefix with FEWER than 16 trailing
+    /// `[a-z0-9_-]` characters is not, on its own, a strong enough signal —
+    /// `sk-ant-api03-abc` only has 9 (`api03-abc`) before the `.`. Per
+    /// spec this host is named unless it separately echoes a live
+    /// credential, which the second half of this test proves by reusing
+    /// the exact same host STRING as the client's real API key.
+    #[tokio::test]
+    async fn short_key_shape_is_named_unless_it_is_also_a_live_credential() {
+        let short_shape_host = "sk-ant-api03-abc.x.example";
+
+        let redirect_response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{short_shape_host}/steal\r\nContent-Length: 0\r\n\r\n"
+        );
         let redirect_calls = Arc::new(AtomicUsize::new(0));
         let redirect_addr = spawn_mock(redirect_response, redirect_calls);
-
         let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
-        let result = client.list_corpora().await;
-
-        match result {
+        match client.list_corpora().await {
             Err(EnscriveError::Redirected { location_host, .. }) => {
                 assert_eq!(
-                    location_host, "<redacted host>",
-                    "expected shape-based redaction"
+                    location_host, short_shape_host,
+                    "a too-short key shape must not be redacted by shape alone"
                 );
             }
             other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
+
+        let redirect_response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{short_shape_host}/steal\r\nContent-Length: 0\r\n\r\n"
+        );
+        let redirect_calls = Arc::new(AtomicUsize::new(0));
+        let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+        // Same host string, but now it IS the live API key (rule 1, not
+        // rule 2 — this must still redact).
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), short_shape_host);
+        match client.list_corpora().await {
+            Err(EnscriveError::Redirected { location_host, .. }) => {
+                assert_eq!(
+                    location_host, "<redacted host>",
+                    "a live credential must redact even when its shape alone would not"
+                );
+            }
+            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
+    }
+
+    /// ENS-6483 R1 L1: the opaque-run threshold is 32, not 24 — a run of
+    /// exactly 31 stays named, 32 is redacted, with no key-shape prefix
+    /// and no live-credential overlap so only rule 3 can be responsible
+    /// either way.
+    #[tokio::test]
+    async fn opaque_run_boundary_is_32_not_24() {
+        let run_31 = "a".repeat(31);
+        let run_32 = "a".repeat(32);
+
+        for (run, expect_redacted) in [(run_31, false), (run_32, true)] {
+            let host = format!("{run}.example.com");
+            let redirect_response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{host}/steal\r\nContent-Length: 0\r\n\r\n"
+            );
+            let redirect_calls = Arc::new(AtomicUsize::new(0));
+            let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+            let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
+
+            match client.list_corpora().await {
+                Err(EnscriveError::Redirected { location_host, .. }) => {
+                    if expect_redacted {
+                        assert_eq!(
+                            location_host,
+                            "<redacted host>",
+                            "a run of {} chars should be redacted",
+                            run.len()
+                        );
+                    } else {
+                        assert_eq!(
+                            location_host,
+                            host,
+                            "a run of {} chars should stay named",
+                            run.len()
+                        );
+                    }
+                }
+                other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+            }
+        }
+    }
+
+    // ENS-6483 R3: the enscrive_<8 hex>_ whole-token redaction test moved
+    // to crate::redact's own test module, alongside the function it tests.
+
+    /// An ordinary hyphenated hostname — an ALB name or a plain
+    /// "network-edge"-style host — must NOT be redacted. Before the
+    /// hyphen-breaks-a-run fix, both tripped the heuristic: the ALB name's
+    /// hyphenated segments run past 24 alnum characters when hyphens don't
+    /// break the count (now 32, and still broken by '-'/'.' either way).
+    /// "network-edge" never matched the prefix check even before this fix
+    /// (its "rk-" substring is mid-word, not label-initial), but it stays
+    /// a useful regression case for the boundary-anchoring behavior too.
+    #[tokio::test]
+    async fn redirect_error_does_not_redact_ordinary_hyphenated_hosts() {
+        for ordinary_host in [
+            "my-keycloak-loadbalancer-1234567890.us-east-1.elb.amazonaws.com",
+            "network-edge.example.com",
+            // The spec's own named-host vector.
+            "desk-top.example",
+            // ENS-6483 (prefix-floor follow-up): "sk_" and "glpat-" are
+            // now in KEY_PREFIXES too, but only at a boundary — neither
+            // substring below starts right after a non-alphanumeric
+            // character (or the string start), so the boundary check
+            // must keep these named exactly like "network-edge" above.
+            "desk_top.example",
+            "myglpat-service.example",
+        ] {
+            let redirect_response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{ordinary_host}/steal\r\nContent-Length: 0\r\n\r\n"
+            );
+            let redirect_calls = Arc::new(AtomicUsize::new(0));
+            let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+
+            let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
+            let result = client.list_corpora().await;
+
+            match result {
+                Err(EnscriveError::Redirected { location_host, .. }) => {
+                    assert_eq!(
+                        location_host, ordinary_host,
+                        "expected {ordinary_host} to be named, not redacted"
+                    );
+                }
+                other => panic!(
+                    "expected Err(EnscriveError::Redirected) for {ordinary_host}, got {other:?}"
+                ),
+            }
         }
     }
 
@@ -547,5 +739,233 @@ mod redirect_tests {
 
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// ENS-6483 (Sol round 2, H): EnscriveError::Http (send_typed's
+    /// non-2xx path) previously carried the FULL, unbounded, unredacted
+    /// response body — a 400 echoing the live X-API-Key or
+    /// X-Embedding-Provider-Key back (e.g. a validation error quoting the
+    /// offending header value) would expose it wherever the error is
+    /// displayed or logged. Both credential slots must be redacted, and
+    /// the body bounded, like every other non-redirect error excerpt in
+    /// the fleet. `long_filler` is space-separated so it never forms its
+    /// own 32+ opaque run, isolating the 200-char bound from rule 3.
+    #[tokio::test]
+    async fn http_error_body_redacts_both_credential_slots_and_is_bounded() {
+        let live_api_key = "test-secret-api-key-1";
+        let live_provider_key = "test-secret-provider-key-2";
+        let long_filler = "context ".repeat(40);
+        let body = format!(
+            r#"{{"error":"invalid header","api_key":"{live_api_key}","provider_key":"{live_provider_key}","detail":"{long_filler}"}}"#
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_mock(
+            format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+            calls.clone(),
+        );
+
+        let client = EnscriveClient::with_provider_key(
+            format!("http://{addr}"),
+            live_api_key,
+            Some(live_provider_key),
+        );
+        let result = client.list_corpora().await;
+
+        match result {
+            Err(EnscriveError::Http { status, body: msg }) => {
+                assert_eq!(status.as_u16(), 400);
+                assert!(
+                    !msg.contains(live_api_key),
+                    "the live API key leaked into the error body: {msg}"
+                );
+                assert!(
+                    !msg.contains(live_provider_key),
+                    "the live provider key leaked into the error body: {msg}"
+                );
+                assert!(
+                    msg.contains("[redacted]"),
+                    "expected both credential spans to be replaced, got: {msg}"
+                );
+                assert_eq!(
+                    msg.chars().count(),
+                    200,
+                    "expected the body to be bounded to exactly 200 chars, got {} chars: {msg}",
+                    msg.chars().count()
+                );
+            }
+            other => panic!("expected Err(EnscriveError::Http), got {other:?}"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn http_error_body_redacts_live_key_escaped_in_json() {
+        let live_api_key = "test-secret-key-42";
+        let body = r#"{"error":"invalid key","detail":"test-secret-key-\u0034\u0032"}"#;
+        assert!(!body.contains(live_api_key), "fixture must use JSON escapes");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_mock(
+            format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+            calls,
+        );
+
+        let client = EnscriveClient::new(format!("http://{addr}"), live_api_key);
+        let error = client.list_corpora().await.unwrap_err().to_string();
+
+        assert!(!error.contains(live_api_key), "live API key leaked: {error}");
+        assert!(error.contains("[redacted]"), "missing redaction marker: {error}");
+    }
+
+    /// ENS-6483 R1 L2(a): `ping()` has its own 3xx check, separate from
+    /// `send_typed`'s — this proves it independently, the same way
+    /// `redirect_is_refused_and_target_is_never_contacted` proves it for
+    /// `send_typed` via `list_corpora()`. Without a dedicated test, a
+    /// change that deleted `ping()`'s own `is_redirection()` branch would
+    /// leave every other test passing while `ping()` silently reported a
+    /// 3xx as a successful status.
+    #[tokio::test]
+    async fn ping_refuses_a_redirect_and_never_contacts_the_target() {
+        let target_calls = Arc::new(AtomicUsize::new(0));
+        let target_addr = spawn_mock(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_string(),
+            target_calls.clone(),
+        );
+
+        let redirect_calls = Arc::new(AtomicUsize::new(0));
+        let redirect_response = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_addr}/v1/corpora\r\nContent-Length: 0\r\n\r\n"
+        );
+        let redirect_addr = spawn_mock(redirect_response, redirect_calls.clone());
+
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), "test-secret-key");
+        let result = client.ping().await;
+
+        match result {
+            Err(EnscriveError::Redirected { status, .. }) => {
+                assert_eq!(status.as_u16(), 307);
+            }
+            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
+        assert_eq!(
+            redirect_calls.load(Ordering::SeqCst),
+            1,
+            "redirecting server was never hit"
+        );
+        assert_eq!(
+            target_calls.load(Ordering::SeqCst),
+            0,
+            "ping()'s redirect target was contacted — X-API-Key may have been resent"
+        );
+    }
+
+    /// ENS-6483 R1 L2(b): the embedding-provider/BYOK key must be
+    /// redacted the same way the API key is — `with_provider_key` passes
+    /// it into `credentials` alongside `api_key` (see `send_typed`), but
+    /// nothing previously exercised that specific slot. Deliberately
+    /// leaves the Location host free of the API key, so this can only
+    /// pass because the provider key is checked too.
+    #[tokio::test]
+    async fn redirect_error_redacts_a_host_that_contains_the_provider_key() {
+        let live_provider_key = "provider-byok-secret-99";
+        let redirect_response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{live_provider_key}.attacker.example/steal\r\nContent-Length: 0\r\n\r\n"
+        );
+        let redirect_calls = Arc::new(AtomicUsize::new(0));
+        let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+
+        let client = EnscriveClient::with_provider_key(
+            format!("http://{redirect_addr}"),
+            "unrelated-api-key",
+            Some(live_provider_key),
+        );
+        let result = client.list_corpora().await;
+
+        match result {
+            Err(EnscriveError::Redirected { location_host, .. }) => {
+                assert_eq!(location_host, "<redacted host>");
+                assert!(
+                    !location_host.contains(live_provider_key),
+                    "the live provider key leaked into the error message"
+                );
+            }
+            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
+    }
+
+    /// ENS-6483 R1 L2(c): `EnscriveError::Redirected` carries only
+    /// `status` and `location_host` (see error.rs) — a 3xx response body
+    /// can never reach it structurally. This test still gives that
+    /// invariant an explicit regression check: the mock redirect response
+    /// carries a body with a sentinel value a credential-bearing payload
+    /// might contain, and neither the error's Display nor its Debug
+    /// output may ever contain it.
+    #[tokio::test]
+    async fn redirected_error_never_carries_the_3xx_body() {
+        // ENS-6483 (Sol round 2, L): the live credential itself, not an
+        // arbitrary sentinel — proves the actual secret can't leak via
+        // the 3xx body, not just some unrelated marker string.
+        let live_key = "test-secret-key-in-redirect-body";
+        let body = format!("{{\"error\":\"see other\",\"detail\":\"{live_key}\"}}");
+        let redirect_response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://example.invalid/steal\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let redirect_calls = Arc::new(AtomicUsize::new(0));
+        let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), live_key);
+        let result = client.list_corpora().await;
+
+        match result {
+            Err(err @ EnscriveError::Redirected { .. }) => {
+                let displayed = err.to_string();
+                let debugged = format!("{err:?}");
+                assert!(
+                    !displayed.contains(live_key),
+                    "the live credential leaked into the Display message: {displayed}"
+                );
+                assert!(
+                    !debugged.contains(live_key),
+                    "the live credential leaked into the Debug message: {debugged}"
+                );
+            }
+            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
+    }
+
+    /// ENS-6483 (Sol round 2, L): a relative `Location` (no scheme/host of
+    /// its own) must resolve against the REQUEST's own host, not fall
+    /// through to "an unspecified host" — `redirect_location_host` joins
+    /// it against `response.url()`, and this drives that through the real
+    /// `list_corpora()` call path rather than testing the helper in
+    /// isolation.
+    #[tokio::test]
+    async fn relative_location_names_the_requests_own_host() {
+        let redirect_calls = Arc::new(AtomicUsize::new(0));
+        let redirect_response =
+            "HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n".to_string();
+        let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
+        let result = client.list_corpora().await;
+
+        match result {
+            Err(EnscriveError::Redirected { location_host, .. }) => {
+                assert!(
+                    location_host.starts_with("127.0.0.1"),
+                    "expected the relative Location to resolve to the request's own host, got: {location_host}"
+                );
+                assert_ne!(location_host, "an unspecified host");
+            }
+            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
     }
 }

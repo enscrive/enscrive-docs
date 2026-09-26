@@ -1,5 +1,6 @@
 use crate::global::GlobalArgs;
 use clap::Args;
+use enscrive_docs_core::redact::redact_excerpt;
 use enscrive_docs_core::{
     Config, CorpusConfig, EnscriveClient, IngestDocument, IngestRequest, VoiceConfig,
 };
@@ -48,10 +49,11 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let endpoint = cfg.resolved_endpoint(global.endpoint.as_deref());
         let provider_key = cfg.resolved_provider_key(global.embedding_provider_key.as_deref());
+        let live_credentials = vec![api_key.clone(), provider_key.clone().unwrap_or_default()];
         let client = EnscriveClient::with_provider_key(endpoint, api_key, provider_key);
         let corpora = client.list_corpora().await.map_err(|e| e.to_string())?;
         let voices = client.list_voices().await.map_err(|e| e.to_string())?;
-        Some((client, corpora, voices))
+        Some((client, corpora, voices, live_credentials))
     };
 
     let mut total_docs = 0usize;
@@ -105,8 +107,12 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
             continue;
         }
 
-        let (client, corpora, voices) =
+        let (client, corpora, voices, live_credentials) =
             remote.as_ref().expect("remote must exist when not dry-run");
+        let credentials = live_credentials
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         let corpus_id = corpora
             .iter()
             .find(|c| c.name == entry.name)
@@ -132,7 +138,7 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
             "[{}] {} document(s) -> corpus {} (voice: {})",
             entry.name,
             docs.len(),
-            corpus_id,
+            redact_excerpt(&corpus_id, &credentials, 200),
             entry.voice
         );
 
@@ -156,23 +162,31 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
                     "  ingested: {} ok / {} failed (job {}, status: {})",
                     summary.documents_ingested,
                     summary.documents_failed,
-                    summary.job_id,
-                    summary.status
+                    redact_excerpt(&summary.job_id, &credentials, 200),
+                    redact_excerpt(&summary.status, &credentials, 200)
                 );
-                for warning in &summary.warnings {
-                    println!("  ! warning: {warning}");
+                for line in format_warning_lines(&summary.warnings, &credentials) {
+                    println!("{line}");
                 }
                 total_docs += summary.documents_ingested as usize;
                 total_corpora += 1;
             }
             Err(e) => {
-                return Err(format!("ingest \"{}\" failed: {e}", entry.name));
+                let error = redact_excerpt(&e.to_string(), &credentials, 200);
+                return Err(format!("ingest \"{}\" failed: {error}", entry.name));
             }
         }
     }
 
     println!("\ndone: {total_docs} document(s) across {total_corpora} corpus(a)");
     Ok(())
+}
+
+fn format_warning_lines(warnings: &[String], credentials: &[&str]) -> Vec<String> {
+    warnings
+        .iter()
+        .map(|warning| redact_excerpt(&format!("  ! warning: {warning}"), credentials, 200))
+        .collect()
 }
 
 fn build_documents(
@@ -260,4 +274,22 @@ fn fingerprint_content(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_warning_lines;
+
+    #[test]
+    fn warning_lines_redact_provider_key_shapes() {
+        let provider_key = format!("{}{}", "sk-ant-api03-", "abcdefghijklmnop");
+        let warning = format!("provider rejected {provider_key}");
+        let lines = format_warning_lines(&[warning], &["api-key", &provider_key]);
+
+        assert_eq!(
+            lines,
+            vec!["  ! warning: provider rejected [redacted]".to_string()]
+        );
+        assert!(!lines[0].contains(&provider_key));
+    }
 }

@@ -8,12 +8,13 @@ pub mod client;
 pub mod config;
 pub mod error;
 pub mod jobs_polling;
+pub mod redact;
 pub mod types;
 
 pub use client::EnscriveClient;
 pub use config::{
-    CorpusConfig, Config, EnscriveAuthConfig, ReturnConfig, SearchConfig, ServeConfig,
-    SiteConfig, ThemeConfig, VersionConfig, VoiceConfig,
+    Config, CorpusConfig, EnscriveAuthConfig, ReturnConfig, SearchConfig, ServeConfig, SiteConfig,
+    ThemeConfig, VersionConfig, VoiceConfig,
 };
 pub use error::{EnscriveError, Result};
 pub use types::{

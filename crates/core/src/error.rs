@@ -12,7 +12,16 @@ pub enum EnscriveError {
     /// client is built with `redirect::Policy::none()` so a redirect is
     /// never silently followed — doing so would resend `X-API-Key` (and, if
     /// set, `X-Embedding-Provider-Key`) to whatever host `Location` names.
-    #[error("HTTP {status}: the server redirected this request to {location_host}; Enscrive credentials (X-API-Key / X-Embedding-Provider-Key) are never resent to a redirect target")]
+    ///
+    /// ENS-6483 (Sol round 3, L): the message contains the fleet spec's
+    /// exact required phrase, `refusing to follow HTTP <status> redirect
+    /// to <host>` — fixed, non-dynamic explanatory text around it is
+    /// permitted, but this substring itself must appear verbatim.
+    #[error(
+        "refusing to follow HTTP {} redirect to {}: Enscrive credentials (X-API-Key / X-Embedding-Provider-Key) are never resent to a redirect target",
+        .status.as_u16(),
+        .location_host
+    )]
     Redirected {
         status: reqwest::StatusCode,
         /// Host only, never the full URL or query string (which could

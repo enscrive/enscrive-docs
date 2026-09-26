@@ -189,24 +189,6 @@ fn format_warning_lines(warnings: &[String], credentials: &[&str]) -> Vec<String
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::format_warning_lines;
-
-    #[test]
-    fn warning_lines_redact_provider_key_shapes() {
-        let provider_key = format!("{}{}", "sk-ant-api03-", "abcdefghijklmnop");
-        let warning = format!("provider rejected {provider_key}");
-        let lines = format_warning_lines(&[warning], &["api-key", &provider_key]);
-
-        assert_eq!(
-            lines,
-            vec!["  ! warning: provider rejected [redacted]".to_string()]
-        );
-        assert!(!lines[0].contains(&provider_key));
-    }
-}
-
 fn build_documents(
     config_dir: &Path,
     corpus: &CorpusConfig,
@@ -292,4 +274,22 @@ fn fingerprint_content(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_warning_lines;
+
+    #[test]
+    fn warning_lines_redact_provider_key_shapes() {
+        let provider_key = format!("{}{}", "sk-ant-api03-", "abcdefghijklmnop");
+        let warning = format!("provider rejected {provider_key}");
+        let lines = format_warning_lines(&[warning], &["api-key", &provider_key]);
+
+        assert_eq!(
+            lines,
+            vec!["  ! warning: provider rejected [redacted]".to_string()]
+        );
+        assert!(!lines[0].contains(&provider_key));
+    }
 }

@@ -44,7 +44,7 @@ async fn tune(global: GlobalArgs, args: TuneArgs) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let endpoint = cfg.resolved_endpoint(global.endpoint.as_deref());
     let provider_key = cfg.resolved_provider_key(global.embedding_provider_key.as_deref());
-    let live_credentials = vec![api_key.clone(), provider_key.clone().unwrap_or_default()];
+    let live_credentials = [api_key.clone(), provider_key.clone().unwrap_or_default()];
     let client = EnscriveClient::with_provider_key(endpoint, api_key, provider_key);
     let credentials = live_credentials
         .iter()

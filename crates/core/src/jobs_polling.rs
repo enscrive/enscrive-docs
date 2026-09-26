@@ -59,6 +59,12 @@ impl PollConfig {
 /// Poll `job_id` until the server reports a terminal `.status` or the
 /// deadline elapses.
 ///
+/// `credentials` are the live secrets this poll's requests actually carry
+/// (the caller's API key and, if set, its BYOK/provider key) — passed
+/// through to redact a failed job's `error_message` before it's
+/// displayed (ENS-6483 Sol round 3, H). Pass `&[]` only when the poller
+/// genuinely carries no credential.
+///
 /// * `Ok((TerminalKind::Succeeded, job))` — job reached a success status.
 /// * `Err(EnscriveError::Other(_))` — job reached a failure status
 ///   (`failed` / `cancelled`), the deadline elapsed without a terminal
@@ -68,6 +74,7 @@ pub async fn await_job_terminal<P: JobPoller>(
     poller: &P,
     job_id: &str,
     cfg: PollConfig,
+    credentials: &[&str],
 ) -> Result<(TerminalKind, ImportJobStatus)> {
     let deadline = std::time::Instant::now() + cfg.timeout;
     let mut delay = cfg.initial_delay;
@@ -87,6 +94,15 @@ pub async fn await_job_terminal<P: JobPoller>(
                                 .error_message
                                 .clone()
                                 .unwrap_or_else(|| "job terminated without error_message".into());
+                            // ENS-6483 (Sol round 3, H): `error_message` is
+                            // a DECODED upstream string (the job's own
+                            // failure detail) that can echo a credential
+                            // back (e.g. a failed provider call's error
+                            // text) — redact with this poll's live
+                            // credentials plus the shape rules, and bound
+                            // like every other non-redirect error excerpt
+                            // in the fleet, before it's ever displayed.
+                            let reason = crate::redact::redact_excerpt(&reason, credentials, 200);
                             Err(EnscriveError::Other(format!(
                                 "ingest job {job_id} {}: {reason}",
                                 job.status
@@ -96,15 +112,26 @@ pub async fn await_job_terminal<P: JobPoller>(
                 }
 
                 if std::time::Instant::now() >= deadline {
+                    // ENS-6483 (Sol round 3, H sweep): unlike the Failed
+                    // branch above (`job.status` there is one of exactly
+                    // two literal strings, `classify_status`'s own match
+                    // arms), a NON-terminal status is an open-ended
+                    // upstream-controlled string — redact it too.
+                    let status = crate::redact::redact_excerpt(&job.status, credentials, 200);
                     return Err(EnscriveError::Other(format!(
-                        "timed out after {}s polling ingest job {job_id} (last status: {})",
+                        "timed out after {}s polling ingest job {job_id} (last status: {status})",
                         cfg.timeout.as_secs(),
-                        job.status
                     )));
                 }
             }
             Err(e) => {
                 if std::time::Instant::now() >= deadline {
+                    // `e` is this crate's own EnscriveError from
+                    // get_job_status (a send_typed() call) — its Display
+                    // is already redacted by send_typed's own fixes, so
+                    // only `last_status` (the same open-ended field as
+                    // above) needs redacting here.
+                    let last_status = crate::redact::redact_excerpt(&last_status, credentials, 200);
                     return Err(EnscriveError::Other(if had_success_response {
                         format!(
                             "poll failed after timeout for ingest job {job_id} \
@@ -212,7 +239,7 @@ mod tests {
             job("running"),
             job("completed"),
         ]);
-        let (kind, result) = await_job_terminal(&poller, "abc", fast_cfg())
+        let (kind, result) = await_job_terminal(&poller, "abc", fast_cfg(), &[])
             .await
             .expect("expected success");
         assert_eq!(kind, TerminalKind::Succeeded);
@@ -225,7 +252,7 @@ mod tests {
         let mut failed = job("failed");
         failed.error_message = Some("embedding rate-limit exceeded".to_string());
         let poller = ScriptedPoller::new(vec![job("pending"), failed]);
-        let err = await_job_terminal(&poller, "xyz", fast_cfg())
+        let err = await_job_terminal(&poller, "xyz", fast_cfg(), &[])
             .await
             .expect_err("expected failure");
         let msg = err.to_string();
@@ -233,10 +260,29 @@ mod tests {
         assert!(msg.contains("embedding rate-limit exceeded"), "got: {msg}");
     }
 
+    /// ENS-6483 (Sol round 3, H): `error_message` is a DECODED upstream
+    /// string that can echo a credential back — this fixture puts the
+    /// live API key directly in it (standing in for a failed provider
+    /// call whose own error text got forwarded into the job record), and
+    /// asserts it's redacted rather than displayed verbatim.
+    #[tokio::test]
+    async fn failed_status_redacts_a_live_credential_in_error_message() {
+        let live_key = "test-secret-ingest-key-42";
+        let mut failed = job("failed");
+        failed.error_message = Some(format!("upstream rejected key {live_key}"));
+        let poller = ScriptedPoller::new(vec![failed]);
+        let err = await_job_terminal(&poller, "xyz", fast_cfg(), &[live_key])
+            .await
+            .expect_err("expected failure");
+        let msg = err.to_string();
+        assert!(!msg.contains(live_key), "the live key leaked into: {msg}");
+        assert!(msg.contains("[redacted]"), "expected a redaction marker: {msg}");
+    }
+
     #[tokio::test]
     async fn cancelled_classified_as_failed() {
         let poller = ScriptedPoller::new(vec![job("cancelled")]);
-        let err = await_job_terminal(&poller, "c", fast_cfg())
+        let err = await_job_terminal(&poller, "c", fast_cfg(), &[])
             .await
             .expect_err("expected failure");
         assert!(err.to_string().contains("cancelled"));
@@ -250,7 +296,7 @@ mod tests {
             max_delay: std::time::Duration::from_millis(1),
             timeout: std::time::Duration::from_millis(5),
         };
-        let err = await_job_terminal(&poller, "t", cfg)
+        let err = await_job_terminal(&poller, "t", cfg, &[])
             .await
             .expect_err("expected timeout");
         assert!(err.to_string().contains("timed out"), "got: {err}");

@@ -5,6 +5,7 @@
 
 use crate::error::{EnscriveError, Result};
 use crate::jobs_polling::{PollConfig, await_job_terminal};
+use crate::redact::{host_looks_credential_shaped, redact_excerpt};
 use crate::types::{
     CorpusDetail, CreateCorpusRequest, CreateVoiceApiRequest, DeleteCorpusResponse,
     DeleteVoiceResponse, ImportJobStatus, IngestRequest, IngestSummary, JobLaunchResponse,
@@ -120,7 +121,24 @@ impl EnscriveClient {
         if text.trim().is_empty() {
             return serde_json::from_str("null").map_err(EnscriveError::from);
         }
-        serde_json::from_str(&text).map_err(EnscriveError::from)
+        serde_json::from_str(&text).map_err(|e| {
+            // ENS-6483 (Sol round 3, H): a 2xx whose body doesn't parse
+            // into the expected shape still gets the credential/shape
+            // redaction and 200-char bound — serde_json's own error
+            // Display can quote a snippet of the unexpected value (e.g.
+            // `invalid type: string "…", expected a struct` at a given
+            // line/column), which could otherwise echo a credential this
+            // request carries straight into the error.
+            let excerpt = redact_excerpt(
+                &format!("response parse failed: {e}"),
+                &[
+                    self.api_key.as_str(),
+                    self.embedding_provider_key.as_deref().unwrap_or(""),
+                ],
+                200,
+            );
+            EnscriveError::Other(excerpt)
+        })
     }
 
     // -- Corpora --
@@ -197,6 +215,10 @@ impl EnscriveClient {
             self,
             &launch.job_id,
             PollConfig::waited(DEFAULT_INGEST_POLL_TIMEOUT_SECS),
+            &[
+                self.api_key.as_str(),
+                self.embedding_provider_key.as_deref().unwrap_or(""),
+            ],
         )
         .await?;
         Ok(IngestSummary {
@@ -292,233 +314,6 @@ fn redirect_error(response: &reqwest::Response, credentials: &[&str]) -> Enscriv
         status: response.status(),
         location_host: host,
     }
-}
-
-/// Best-effort, dependency-free detection of a credential-shaped substring
-/// in an already-lowercased hostname, per the fleet ENS-6483 redaction
-/// spec (~/work/sec-wave/w3-research/ENS-6483-redaction-spec.md), rule 2
-/// and rule 3:
-///
-/// - a common provider/platform-key prefix, BOUNDARY-anchored — at the
-///   start of the host, or immediately after any non-alphanumeric
-///   character (not just `.`, which is what the previous per-label
-///   `starts_with` check amounted to) — followed by at least
-///   `MIN_KEY_SUFFIX_LEN` more `[a-z0-9_-]` characters. The trailing run
-///   is the entropy signal: a bare prefix with nothing after it isn't
-///   itself suspicious.
-/// - this product's own key shape instead: `enscrive_` + exactly 8 hex
-///   digits + `_`. That whole fixed form is self-contained (the 8 hex
-///   digits are the entropy signal) and needs no extra trailing length.
-/// - OR a run of `MIN_OPAQUE_RUN_LEN`+ consecutive `[a-z0-9_]` characters
-///   anywhere in the host — `.` and `-` break the run (an ordinary
-///   hyphenated hostname can otherwise easily run past 32 total alnum
-///   characters).
-///
-/// Boundary anchoring (not "starts a DNS label") is what makes
-/// `prefix-sk-<16+ chars>` count as a match — the hyphen before `sk-` is a
-/// boundary too — while a host like `network-edge.example.com` or an ALB
-/// name like `my-keycloak-loadbalancer-1234567890.us-east-1.elb.amazonaws.com`
-/// stays named: the `rk-`/`sk-`-shaped substrings inside them
-/// ("netwo**rk-**edge") follow an alphanumeric character, not a boundary,
-/// and none of their hyphen/dot-separated segments reach the suffix or
-/// run-length thresholds.
-// Generic vendor/platform prefixes (a plain prefix string; each needs
-// MIN_KEY_SUFFIX_LEN more suffix characters to count — see below). The
-// fleet spec's own list is a FLOOR, not an exact set: redacting more
-// genuine credential shapes is the safe direction, and the boundary
-// anchor plus the 16-char suffix requirement keep false positives on
-// ordinary hosts negligible either way. This list is therefore a
-// superset of the spec's minimum.
-const KEY_PREFIXES: &[&str] = &[
-    "sk-ant-",
-    "sk-proj-",
-    "sk-",
-    "sk_",
-    "rk-",
-    "pk-",
-    // Slack: one letter after "xox" names the token class (a = app,
-    // b = bot, p = user/legacy, r = refresh, s = workspace). Bare
-    // "xox-" is deliberately excluded — with no letter to require, it
-    // would match any ordinary "xox..." substring at a boundary too.
-    "xoxa-",
-    "xoxb-",
-    "xoxp-",
-    "xoxr-",
-    "xoxs-",
-    "ghp_",
-    "gho_",
-    "ghu_",
-    "ghs_",
-    "github_pat_",
-    "aiza",
-    "ya29.",
-    "glpat-",
-    "npg_",
-];
-const MIN_KEY_SUFFIX_LEN: usize = 16;
-const MIN_OPAQUE_RUN_LEN: usize = 32;
-// This product's own key shape: `enscrive_<8 hex>_`, a fixed,
-// self-contained form handled separately from the generic prefixes.
-const ENSCRIVE_PREFIX: &str = "enscrive_";
-const ENSCRIVE_ID_LEN: usize = 8;
-
-fn is_boundary(c: char) -> bool {
-    !c.is_ascii_alphanumeric()
-}
-
-fn is_key_suffix_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || c == '-'
-}
-
-/// Byte spans in `lower` (already ASCII-lowercased) matched by rule 2 (a
-/// boundary-anchored key prefix) or rule 3 (a 32+ char opaque run).
-/// [`host_looks_credential_shaped`] is just "is this non-empty"; a
-/// bounded text excerpt ([`redact_excerpt`]) needs the actual spans so it
-/// can replace each match rather than blacklisting the whole text.
-fn shape_spans(lower: &str) -> Vec<(usize, usize)> {
-    let mut spans = Vec::new();
-
-    let mut prev_char: Option<char> = None;
-    for (i, c) in lower.char_indices() {
-        let at_boundary = match prev_char {
-            None => true,
-            Some(p) => is_boundary(p),
-        };
-        prev_char = Some(c);
-        if !at_boundary {
-            continue;
-        }
-        let rest = &lower[i..];
-
-        if let Some(after) = rest.strip_prefix(ENSCRIVE_PREFIX) {
-            let hex_len = after
-                .chars()
-                .take(ENSCRIVE_ID_LEN)
-                .take_while(char::is_ascii_hexdigit)
-                .count();
-            if hex_len == ENSCRIVE_ID_LEN && after.as_bytes().get(ENSCRIVE_ID_LEN) == Some(&b'_') {
-                let shape_len = ENSCRIVE_PREFIX.len() + ENSCRIVE_ID_LEN + 1;
-                // ENS-6483 (ctt Sol round 4, M2 — ported here too, same
-                // bug): the fixed shape alone is enough to DETECT a
-                // credential (a host-redaction boolean doesn't care how
-                // long the matched span is), but TEXT redaction must
-                // remove the whole token, not just its recognizable
-                // prefix — continue consuming the token's remaining
-                // key-alphabet characters past the shape, so the actual
-                // secret material after "enscrive_<8 hex>_" is covered
-                // too.
-                let extra_len = after[ENSCRIVE_ID_LEN + 1..]
-                    .chars()
-                    .take_while(|&c| is_key_suffix_char(c))
-                    .count();
-                spans.push((i, i + shape_len + extra_len));
-            }
-        }
-
-        for prefix in KEY_PREFIXES {
-            if let Some(after) = rest.strip_prefix(prefix) {
-                let suffix_len = after.chars().take_while(|&c| is_key_suffix_char(c)).count();
-                if suffix_len >= MIN_KEY_SUFFIX_LEN {
-                    spans.push((i, i + prefix.len() + suffix_len));
-                }
-            }
-        }
-    }
-
-    // Rule 3: a run of 32+ consecutive [a-z0-9_] characters; '-' and '.'
-    // (like any other non-matching character) break it.
-    let mut run_start: Option<usize> = None;
-    let mut run_len = 0usize;
-    let mut cursor = 0usize;
-    for (i, c) in lower.char_indices() {
-        cursor = i + c.len_utf8();
-        if c.is_ascii_alphanumeric() || c == '_' {
-            if run_start.is_none() {
-                run_start = Some(i);
-                run_len = 0;
-            }
-            run_len += 1;
-        } else {
-            if let Some(start) = run_start.take()
-                && run_len >= MIN_OPAQUE_RUN_LEN
-            {
-                spans.push((start, i));
-            }
-            run_len = 0;
-        }
-    }
-    if let Some(start) = run_start
-        && run_len >= MIN_OPAQUE_RUN_LEN
-    {
-        spans.push((start, cursor));
-    }
-
-    spans
-}
-
-/// Rule 2 + rule 3: does `host_lower` (already ASCII-lowercased) contain a
-/// credential-shaped substring anywhere?
-fn host_looks_credential_shaped(host_lower: &str) -> bool {
-    !shape_spans(host_lower).is_empty()
-}
-
-/// Byte spans in `lower` (already ASCII-lowercased) where any (non-empty)
-/// entry of `credentials` occurs, case-insensitively.
-fn credential_spans(lower: &str, credentials: &[&str]) -> Vec<(usize, usize)> {
-    let mut spans = Vec::new();
-    for cred in credentials {
-        if cred.is_empty() {
-            continue;
-        }
-        let cred_lower = cred.to_ascii_lowercase();
-        let mut start = 0usize;
-        while let Some(pos) = lower[start..].find(&cred_lower) {
-            let abs_start = start + pos;
-            let abs_end = abs_start + cred_lower.len();
-            spans.push((abs_start, abs_end));
-            start = abs_end;
-        }
-    }
-    spans
-}
-
-fn merge_spans(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
-    if spans.is_empty() {
-        return spans;
-    }
-    spans.sort_unstable_by_key(|&(s, _)| s);
-    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
-    for (s, e) in spans {
-        match merged.last_mut() {
-            Some(last) if s <= last.1 => last.1 = last.1.max(e),
-            _ => merged.push((s, e)),
-        }
-    }
-    merged
-}
-
-/// Replace every rule-1 (live credential, case-insensitive) or rule-2/3
-/// (key-shape) span in `text` with `[redacted]`, then bound the result to
-/// `max_chars` characters. Used for a non-3xx error body excerpt — a
-/// redirect's body must never be read at all, but a 4xx/5xx body can
-/// otherwise echo a credential straight back (e.g. a validation error
-/// quoting the offending header value).
-fn redact_excerpt(text: &str, credentials: &[&str], max_chars: usize) -> String {
-    let lower = text.to_ascii_lowercase();
-    let mut spans = credential_spans(&lower, credentials);
-    spans.extend(shape_spans(&lower));
-    let spans = merge_spans(spans);
-
-    let mut out = String::new();
-    let mut last = 0usize;
-    for (start, end) in spans {
-        out.push_str(&text[last..start]);
-        out.push_str("[redacted]");
-        last = end;
-    }
-    out.push_str(&text[last..]);
-
-    out.chars().take(max_chars).collect()
 }
 
 impl crate::jobs_polling::JobPoller for EnscriveClient {
@@ -621,6 +416,25 @@ mod redirect_tests {
             target_calls.load(Ordering::SeqCst),
             0,
             "redirect target was contacted — X-API-Key may have been resent"
+        );
+    }
+
+    /// ENS-6483 (Sol round 3, L): the fleet spec's exact required phrase
+    /// must appear verbatim in the Display text — not just an equivalent
+    /// paraphrase — so every repo's redirect refusal is grep-consistent.
+    #[tokio::test]
+    async fn redirected_error_display_contains_the_spec_exact_phrase() {
+        let redirect_calls = Arc::new(AtomicUsize::new(0));
+        let redirect_response =
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://ordinary.example/steal\r\nContent-Length: 0\r\n\r\n"
+                .to_string();
+        let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
+        let err = client.list_corpora().await.unwrap_err().to_string();
+        assert!(
+            err.contains("refusing to follow HTTP 307 redirect to ordinary.example"),
+            "expected the spec's exact phrase, got: {err}"
         );
     }
 
@@ -838,31 +652,8 @@ mod redirect_tests {
         }
     }
 
-    /// ENS-6483 (ctt Sol round 4, M2 — the same bug applied here too):
-    /// an `enscrive_<8 hex>_` token's SHAPE recognition stops right after
-    /// the fixed prefix+hex+underscore (that's all `host_looks_credential_
-    /// shaped` needs for a boolean check), but the actual secret material
-    /// continues past that point in the real key format — TEXT redaction
-    /// must consume the whole token, not just its recognizable shape
-    /// prefix, or the tail of a real key survives redaction untouched.
-    /// The token is exactly 31 characters total (18 for the shape +
-    /// "qrstuvwxyzabc", 13 more) — one under rule 3's 32-char opaque-run
-    /// threshold, so rule 3 can't be what's silently covering the gap;
-    /// only the fixed-shape span's own length decides this.
-    #[test]
-    fn redact_excerpt_redacts_the_whole_enscrive_token_not_just_its_shape_prefix() {
-        let token = "enscrive_deadbeef_qrstuvwxyzabc";
-        assert_eq!(token.len(), 31, "fixture must stay under the 32-char opaque-run threshold");
-        let text = format!("upstream said: invalid key {token} for this request");
-        let out = redact_excerpt(&text, &[], 200);
-        assert!(!out.contains(token), "the full token leaked into: {out}");
-        assert!(
-            !out.contains("qrstuvwxyzabc"),
-            "the token's suffix (the actual secret material past the \
-             enscrive_<8 hex>_ shape) leaked into: {out}"
-        );
-        assert!(out.contains("[redacted]"), "expected a redaction marker: {out}");
-    }
+    // ENS-6483 R3: the enscrive_<8 hex>_ whole-token redaction test moved
+    // to crate::redact's own test module, alongside the function it tests.
 
     /// An ordinary hyphenated hostname — an ALB name or a plain
     /// "network-edge"-style host — must NOT be redacted. Before the

@@ -8,6 +8,7 @@ pub mod client;
 pub mod config;
 pub mod error;
 pub mod jobs_polling;
+mod redact;
 pub mod types;
 
 pub use client::EnscriveClient;

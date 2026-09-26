@@ -97,7 +97,25 @@ impl EnscriveClient {
         let status = response.status();
         let text = response.text().await?;
         if !status.is_success() {
-            return Err(EnscriveError::Http { status, body: text });
+            // ENS-6483 (Sol round 2, H): a 4xx/5xx body can echo a
+            // credential straight back (e.g. a validation error quoting
+            // the offending X-API-Key/X-Embedding-Provider-Key header
+            // value) — redact with this request's live credentials plus
+            // the shape rules, and bound like every other non-redirect
+            // error excerpt in the fleet, before it ever reaches
+            // EnscriveError::Http.
+            let excerpt = redact_excerpt(
+                &text,
+                &[
+                    self.api_key.as_str(),
+                    self.embedding_provider_key.as_deref().unwrap_or(""),
+                ],
+                200,
+            );
+            return Err(EnscriveError::Http {
+                status,
+                body: excerpt,
+            });
         }
         if text.trim().is_empty() {
             return serde_json::from_str("null").map_err(EnscriveError::from);
@@ -304,52 +322,64 @@ fn redirect_error(response: &reqwest::Response, credentials: &[&str]) -> Enscriv
 /// ("netwo**rk-**edge") follow an alphanumeric character, not a boundary,
 /// and none of their hyphen/dot-separated segments reach the suffix or
 /// run-length thresholds.
-fn host_looks_credential_shaped(host_lower: &str) -> bool {
-    // Generic vendor/platform prefixes (a plain prefix string; each needs
-    // MIN_KEY_SUFFIX_LEN more suffix characters to count — see below). The
-    // fleet spec's own list is a FLOOR, not an exact set: redacting more
-    // genuine credential shapes is the safe direction, and the boundary
-    // anchor plus the 16-char suffix requirement keep false positives on
-    // ordinary hosts negligible either way. This list is therefore a
-    // superset of the spec's minimum.
-    const KEY_PREFIXES: &[&str] = &[
-        "sk-ant-",
-        "sk-proj-",
-        "sk-",
-        "sk_",
-        "rk-",
-        "pk-",
-        // Slack: one letter after "xox" names the token class (a = app,
-        // b = bot, p = user/legacy, r = refresh, s = workspace). Bare
-        // "xox-" is deliberately excluded — with no letter to require, it
-        // would match any ordinary "xox..." substring at a boundary too.
-        "xoxa-",
-        "xoxb-",
-        "xoxp-",
-        "xoxr-",
-        "xoxs-",
-        "ghp_",
-        "gho_",
-        "ghu_",
-        "ghs_",
-        "github_pat_",
-        "aiza",
-        "ya29.",
-        "glpat-",
-        "npg_",
-    ];
-    const MIN_KEY_SUFFIX_LEN: usize = 16;
-    const MIN_OPAQUE_RUN_LEN: usize = 32;
-    // This product's own key shape: `enscrive_<8 hex>_`, a fixed,
-    // self-contained form handled separately from the generic prefixes.
-    const ENSCRIVE_PREFIX: &str = "enscrive_";
-    const ENSCRIVE_ID_LEN: usize = 8;
+// Generic vendor/platform prefixes (a plain prefix string; each needs
+// MIN_KEY_SUFFIX_LEN more suffix characters to count — see below). The
+// fleet spec's own list is a FLOOR, not an exact set: redacting more
+// genuine credential shapes is the safe direction, and the boundary
+// anchor plus the 16-char suffix requirement keep false positives on
+// ordinary hosts negligible either way. This list is therefore a
+// superset of the spec's minimum.
+const KEY_PREFIXES: &[&str] = &[
+    "sk-ant-",
+    "sk-proj-",
+    "sk-",
+    "sk_",
+    "rk-",
+    "pk-",
+    // Slack: one letter after "xox" names the token class (a = app,
+    // b = bot, p = user/legacy, r = refresh, s = workspace). Bare
+    // "xox-" is deliberately excluded — with no letter to require, it
+    // would match any ordinary "xox..." substring at a boundary too.
+    "xoxa-",
+    "xoxb-",
+    "xoxp-",
+    "xoxr-",
+    "xoxs-",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_",
+    "aiza",
+    "ya29.",
+    "glpat-",
+    "npg_",
+];
+const MIN_KEY_SUFFIX_LEN: usize = 16;
+const MIN_OPAQUE_RUN_LEN: usize = 32;
+// This product's own key shape: `enscrive_<8 hex>_`, a fixed,
+// self-contained form handled separately from the generic prefixes.
+const ENSCRIVE_PREFIX: &str = "enscrive_";
+const ENSCRIVE_ID_LEN: usize = 8;
 
-    let is_boundary = |c: char| !c.is_ascii_alphanumeric();
-    let is_key_suffix_char = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+fn is_boundary(c: char) -> bool {
+    !c.is_ascii_alphanumeric()
+}
+
+fn is_key_suffix_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// Byte spans in `lower` (already ASCII-lowercased) matched by rule 2 (a
+/// boundary-anchored key prefix) or rule 3 (a 32+ char opaque run).
+/// [`host_looks_credential_shaped`] is just "is this non-empty"; a
+/// bounded text excerpt ([`redact_excerpt`]) needs the actual spans so it
+/// can replace each match rather than blacklisting the whole text.
+fn shape_spans(lower: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
 
     let mut prev_char: Option<char> = None;
-    for (i, c) in host_lower.char_indices() {
+    for (i, c) in lower.char_indices() {
         let at_boundary = match prev_char {
             None => true,
             Some(p) => is_boundary(p),
@@ -358,7 +388,7 @@ fn host_looks_credential_shaped(host_lower: &str) -> bool {
         if !at_boundary {
             continue;
         }
-        let rest = &host_lower[i..];
+        let rest = &lower[i..];
 
         if let Some(after) = rest.strip_prefix(ENSCRIVE_PREFIX) {
             let hex_len = after
@@ -367,7 +397,7 @@ fn host_looks_credential_shaped(host_lower: &str) -> bool {
                 .take_while(char::is_ascii_hexdigit)
                 .count();
             if hex_len == ENSCRIVE_ID_LEN && after.as_bytes().get(ENSCRIVE_ID_LEN) == Some(&b'_') {
-                return true;
+                spans.push((i, i + ENSCRIVE_PREFIX.len() + ENSCRIVE_ID_LEN + 1));
             }
         }
 
@@ -375,26 +405,106 @@ fn host_looks_credential_shaped(host_lower: &str) -> bool {
             if let Some(after) = rest.strip_prefix(prefix) {
                 let suffix_len = after.chars().take_while(|&c| is_key_suffix_char(c)).count();
                 if suffix_len >= MIN_KEY_SUFFIX_LEN {
-                    return true;
+                    spans.push((i, i + prefix.len() + suffix_len));
                 }
             }
         }
     }
 
-    let mut run = 0usize;
-    for c in host_lower.chars() {
+    // Rule 3: a run of 32+ consecutive [a-z0-9_] characters; '-' and '.'
+    // (like any other non-matching character) break it.
+    let mut run_start: Option<usize> = None;
+    let mut run_len = 0usize;
+    let mut cursor = 0usize;
+    for (i, c) in lower.char_indices() {
+        cursor = i + c.len_utf8();
         if c.is_ascii_alphanumeric() || c == '_' {
-            run += 1;
-            if run >= MIN_OPAQUE_RUN_LEN {
-                return true;
+            if run_start.is_none() {
+                run_start = Some(i);
+                run_len = 0;
             }
+            run_len += 1;
         } else {
-            // Includes '-': a hyphen breaks a run exactly like a `.`
-            // label boundary would.
-            run = 0;
+            if let Some(start) = run_start.take() {
+                if run_len >= MIN_OPAQUE_RUN_LEN {
+                    spans.push((start, i));
+                }
+            }
+            run_len = 0;
         }
     }
-    false
+    if let Some(start) = run_start {
+        if run_len >= MIN_OPAQUE_RUN_LEN {
+            spans.push((start, cursor));
+        }
+    }
+
+    spans
+}
+
+/// Rule 2 + rule 3: does `host_lower` (already ASCII-lowercased) contain a
+/// credential-shaped substring anywhere?
+fn host_looks_credential_shaped(host_lower: &str) -> bool {
+    !shape_spans(host_lower).is_empty()
+}
+
+/// Byte spans in `lower` (already ASCII-lowercased) where any (non-empty)
+/// entry of `credentials` occurs, case-insensitively.
+fn credential_spans(lower: &str, credentials: &[&str]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for cred in credentials {
+        if cred.is_empty() {
+            continue;
+        }
+        let cred_lower = cred.to_ascii_lowercase();
+        let mut start = 0usize;
+        while let Some(pos) = lower[start..].find(&cred_lower) {
+            let abs_start = start + pos;
+            let abs_end = abs_start + cred_lower.len();
+            spans.push((abs_start, abs_end));
+            start = abs_end;
+        }
+    }
+    spans
+}
+
+fn merge_spans(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    if spans.is_empty() {
+        return spans;
+    }
+    spans.sort_unstable_by_key(|&(s, _)| s);
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    for (s, e) in spans {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    merged
+}
+
+/// Replace every rule-1 (live credential, case-insensitive) or rule-2/3
+/// (key-shape) span in `text` with `[redacted]`, then bound the result to
+/// `max_chars` characters. Used for a non-3xx error body excerpt — a
+/// redirect's body must never be read at all, but a 4xx/5xx body can
+/// otherwise echo a credential straight back (e.g. a validation error
+/// quoting the offending header value).
+fn redact_excerpt(text: &str, credentials: &[&str], max_chars: usize) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut spans = credential_spans(&lower, credentials);
+    spans.extend(shape_spans(&lower));
+    let spans = merge_spans(spans);
+
+    let mut out = String::new();
+    let mut last = 0usize;
+    for (start, end) in spans {
+        out.push_str(&text[last..start]);
+        out.push_str("[redacted]");
+        last = end;
+    }
+    out.push_str(&text[last..]);
+
+    out.chars().take(max_chars).collect()
 }
 
 impl crate::jobs_polling::JobPoller for EnscriveClient {
@@ -727,6 +837,8 @@ mod redirect_tests {
         for ordinary_host in [
             "my-keycloak-loadbalancer-1234567890.us-east-1.elb.amazonaws.com",
             "network-edge.example.com",
+            // The spec's own named-host vector.
+            "desk-top.example",
             // ENS-6483 (prefix-floor follow-up): "sk_" and "glpat-" are
             // now in KEY_PREFIXES too, but only at a boundary — neither
             // substring below starts right after a non-alphanumeric
@@ -770,6 +882,70 @@ mod redirect_tests {
         let result = client.list_corpora().await;
 
         assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// ENS-6483 (Sol round 2, H): EnscriveError::Http (send_typed's
+    /// non-2xx path) previously carried the FULL, unbounded, unredacted
+    /// response body — a 400 echoing the live X-API-Key or
+    /// X-Embedding-Provider-Key back (e.g. a validation error quoting the
+    /// offending header value) would expose it wherever the error is
+    /// displayed or logged. Both credential slots must be redacted, and
+    /// the body bounded, like every other non-redirect error excerpt in
+    /// the fleet. `long_filler` is space-separated so it never forms its
+    /// own 32+ opaque run, isolating the 200-char bound from rule 3.
+    #[tokio::test]
+    async fn http_error_body_redacts_both_credential_slots_and_is_bounded() {
+        let live_api_key = "test-secret-api-key-1";
+        let live_provider_key = "test-secret-provider-key-2";
+        let long_filler = "context ".repeat(40);
+        let body = format!(
+            r#"{{"error":"invalid header","api_key":"{live_api_key}","provider_key":"{live_provider_key}","detail":"{long_filler}"}}"#
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_mock(
+            format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+            calls.clone(),
+        );
+
+        let client = EnscriveClient::with_provider_key(
+            format!("http://{addr}"),
+            live_api_key,
+            Some(live_provider_key),
+        );
+        let result = client.list_corpora().await;
+
+        match result {
+            Err(EnscriveError::Http {
+                status,
+                body: msg,
+            }) => {
+                assert_eq!(status.as_u16(), 400);
+                assert!(
+                    !msg.contains(live_api_key),
+                    "the live API key leaked into the error body: {msg}"
+                );
+                assert!(
+                    !msg.contains(live_provider_key),
+                    "the live provider key leaked into the error body: {msg}"
+                );
+                assert!(
+                    msg.contains("[redacted]"),
+                    "expected both credential spans to be replaced, got: {msg}"
+                );
+                assert_eq!(
+                    msg.chars().count(),
+                    200,
+                    "expected the body to be bounded to exactly 200 chars, got {} chars: {msg}",
+                    msg.chars().count()
+                );
+            }
+            other => panic!("expected Err(EnscriveError::Http), got {other:?}"),
+        }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -858,8 +1034,11 @@ mod redirect_tests {
     /// output may ever contain it.
     #[tokio::test]
     async fn redirected_error_never_carries_the_3xx_body() {
-        let sentinel = "leaked-3xx-body-sentinel-do-not-log-me";
-        let body = format!("{{\"error\":\"see other\",\"detail\":\"{sentinel}\"}}");
+        // ENS-6483 (Sol round 2, L): the live credential itself, not an
+        // arbitrary sentinel — proves the actual secret can't leak via
+        // the 3xx body, not just some unrelated marker string.
+        let live_key = "test-secret-key-in-redirect-body";
+        let body = format!("{{\"error\":\"see other\",\"detail\":\"{live_key}\"}}");
         let redirect_response = format!(
             "HTTP/1.1 302 Found\r\nLocation: http://example.invalid/steal\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
@@ -867,7 +1046,7 @@ mod redirect_tests {
         let redirect_calls = Arc::new(AtomicUsize::new(0));
         let redirect_addr = spawn_mock(redirect_response, redirect_calls);
 
-        let client = EnscriveClient::new(format!("http://{redirect_addr}"), "test-secret-key");
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), live_key);
         let result = client.list_corpora().await;
 
         match result {
@@ -875,13 +1054,41 @@ mod redirect_tests {
                 let displayed = err.to_string();
                 let debugged = format!("{err:?}");
                 assert!(
-                    !displayed.contains(sentinel),
-                    "3xx body sentinel leaked into the Display message: {displayed}"
+                    !displayed.contains(live_key),
+                    "the live credential leaked into the Display message: {displayed}"
                 );
                 assert!(
-                    !debugged.contains(sentinel),
-                    "3xx body sentinel leaked into the Debug message: {debugged}"
+                    !debugged.contains(live_key),
+                    "the live credential leaked into the Debug message: {debugged}"
                 );
+            }
+            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
+    }
+
+    /// ENS-6483 (Sol round 2, L): a relative `Location` (no scheme/host of
+    /// its own) must resolve against the REQUEST's own host, not fall
+    /// through to "an unspecified host" — `redirect_location_host` joins
+    /// it against `response.url()`, and this drives that through the real
+    /// `list_corpora()` call path rather than testing the helper in
+    /// isolation.
+    #[tokio::test]
+    async fn relative_location_names_the_requests_own_host() {
+        let redirect_calls = Arc::new(AtomicUsize::new(0));
+        let redirect_response =
+            "HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n".to_string();
+        let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
+        let result = client.list_corpora().await;
+
+        match result {
+            Err(EnscriveError::Redirected { location_host, .. }) => {
+                assert!(
+                    location_host.starts_with("127.0.0.1"),
+                    "expected the relative Location to resolve to the request's own host, got: {location_host}"
+                );
+                assert_ne!(location_host, "an unspecified host");
             }
             other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
         }

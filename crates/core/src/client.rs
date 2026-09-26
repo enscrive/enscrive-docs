@@ -277,53 +277,105 @@ fn redirect_error(response: &reqwest::Response, credentials: &[&str]) -> Enscriv
 }
 
 /// Best-effort, dependency-free detection of a credential-shaped substring
-/// in an already-lowercased hostname: a common provider/platform-key
-/// prefix (including this product's own `enscrive_` key prefix) at the
-/// START of a DNS label, or a run of 24+ consecutive `[a-z0-9_]`
-/// characters within one label (ordinary hostname labels don't run that
-/// long without a `.` or `-` break; a bearer/API-key value typically
-/// does).
+/// in an already-lowercased hostname, per the fleet ENS-6483 redaction
+/// spec (~/work/sec-wave/w3-research/ENS-6483-redaction-spec.md), rule 2
+/// and rule 3:
 ///
-/// Both checks are anchored to a *label*, not matched as a bare substring
-/// anywhere in the host: an ALB name like
-/// `my-keycloak-loadbalancer-1234567890.us-east-1.elb.amazonaws.com` or a
-/// host like `network-edge.example.com` must NOT be redacted just because
-/// `rk-` (from "wo**rk-**edge"/"...**rk-**loadbalancer") appears mid-word,
-/// and hyphens must break a run the same way dots do (an ordinary
-/// hyphenated hostname can easily exceed 24 total alnum characters).
+/// - a common provider/platform-key prefix, BOUNDARY-anchored — at the
+///   start of the host, or immediately after any non-alphanumeric
+///   character (not just `.`, which is what the previous per-label
+///   `starts_with` check amounted to) — followed by at least
+///   `MIN_KEY_SUFFIX_LEN` more `[a-z0-9_-]` characters. The trailing run
+///   is the entropy signal: a bare prefix with nothing after it isn't
+///   itself suspicious.
+/// - this product's own key shape instead: `enscrive_` + exactly 8 hex
+///   digits + `_`. That whole fixed form is self-contained (the 8 hex
+///   digits are the entropy signal) and needs no extra trailing length.
+/// - OR a run of `MIN_OPAQUE_RUN_LEN`+ consecutive `[a-z0-9_]` characters
+///   anywhere in the host — `.` and `-` break the run (an ordinary
+///   hyphenated hostname can otherwise easily run past 32 total alnum
+///   characters).
+///
+/// Boundary anchoring (not "starts a DNS label") is what makes
+/// `prefix-sk-<16+ chars>` count as a match — the hyphen before `sk-` is a
+/// boundary too — while a host like `network-edge.example.com` or an ALB
+/// name like `my-keycloak-loadbalancer-1234567890.us-east-1.elb.amazonaws.com`
+/// stays named: the `rk-`/`sk-`-shaped substrings inside them
+/// ("netwo**rk-**edge") follow an alphanumeric character, not a boundary,
+/// and none of their hyphen/dot-separated segments reach the suffix or
+/// run-length thresholds.
 fn host_looks_credential_shaped(host_lower: &str) -> bool {
+    // The fleet spec's generic vendor/platform prefixes (a plain prefix
+    // string; each needs MIN_KEY_SUFFIX_LEN more suffix characters to
+    // count — see below).
     const KEY_PREFIXES: &[&str] = &[
-        "enscrive_",
-        "sk-",
-        "sk_",
         "sk-ant-",
-        "pk-",
+        "sk-proj-",
+        "sk-",
         "rk-",
-        "aiza",
-        "ya29.",
-        "glpat-",
-        "gho_",
+        "pk-",
+        "xoxb-",
+        "xoxp-",
         "ghp_",
-        "ghu_",
-        "ghs_",
-        "xox",
+        "gho_",
+        "github_pat_",
+        "aiza",
+        "npg_",
     ];
-    for label in host_lower.split('.') {
-        if KEY_PREFIXES.iter().any(|p| label.starts_with(p)) {
-            return true;
+    const MIN_KEY_SUFFIX_LEN: usize = 16;
+    const MIN_OPAQUE_RUN_LEN: usize = 32;
+    // This product's own key shape: `enscrive_<8 hex>_`, a fixed,
+    // self-contained form handled separately from the generic prefixes.
+    const ENSCRIVE_PREFIX: &str = "enscrive_";
+    const ENSCRIVE_ID_LEN: usize = 8;
+
+    let is_boundary = |c: char| !c.is_ascii_alphanumeric();
+    let is_key_suffix_char = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+
+    let mut prev_char: Option<char> = None;
+    for (i, c) in host_lower.char_indices() {
+        let at_boundary = match prev_char {
+            None => true,
+            Some(p) => is_boundary(p),
+        };
+        prev_char = Some(c);
+        if !at_boundary {
+            continue;
         }
-        let mut run = 0usize;
-        for c in label.chars() {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                run += 1;
-                if run >= 24 {
+        let rest = &host_lower[i..];
+
+        if let Some(after) = rest.strip_prefix(ENSCRIVE_PREFIX) {
+            let hex_len = after
+                .chars()
+                .take(ENSCRIVE_ID_LEN)
+                .take_while(char::is_ascii_hexdigit)
+                .count();
+            if hex_len == ENSCRIVE_ID_LEN && after.as_bytes().get(ENSCRIVE_ID_LEN) == Some(&b'_') {
+                return true;
+            }
+        }
+
+        for prefix in KEY_PREFIXES {
+            if let Some(after) = rest.strip_prefix(prefix) {
+                let suffix_len = after.chars().take_while(|&c| is_key_suffix_char(c)).count();
+                if suffix_len >= MIN_KEY_SUFFIX_LEN {
                     return true;
                 }
-            } else {
-                // Includes '-': a hyphen breaks a run exactly like a `.`
-                // label boundary would.
-                run = 0;
             }
+        }
+    }
+
+    let mut run = 0usize;
+    for c in host_lower.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            run += 1;
+            if run >= MIN_OPAQUE_RUN_LEN {
+                return true;
+            }
+        } else {
+            // Includes '-': a hyphen breaks a run exactly like a `.`
+            // label boundary would.
+            run = 0;
         }
     }
     false
@@ -526,13 +578,17 @@ mod redirect_tests {
     }
 
     /// A host that merely LOOKS credential-shaped is redacted even when it
-    /// doesn't echo the live key at all — both a short host (too short for
-    /// the run-length rule alone to explain, so this exercises KEY_PREFIXES
-    /// specifically) and this product's own `enscrive_` prefix.
+    /// doesn't echo the live key at all — a shape with enough trailing
+    /// characters (rule 2's generic-prefix branch, kept under 32 total so
+    /// rule 3 can't be what's actually catching it), a boundary-anchored
+    /// shape following a hyphen rather than a label start (the ENS-6483 M
+    /// fix — this escaped the old per-label `starts_with` check), and this
+    /// product's own fixed `enscrive_<8 hex>_` shape.
     #[tokio::test]
     async fn redirect_error_redacts_known_key_shapes() {
         for shaped_host in [
-            "sk-ant-api03-abc.x.example",
+            "sk-ant-api03-abcdefghijklmnop.x.example",
+            "prefix-sk-abcdefghijklmnopqrst.example",
             "enscrive_1a2b3c4d_x.evil.example",
         ] {
             let redirect_response = format!(
@@ -558,12 +614,98 @@ mod redirect_tests {
         }
     }
 
+    /// ENS-6483 R1 L1: a key-shape prefix with FEWER than 16 trailing
+    /// `[a-z0-9_-]` characters is not, on its own, a strong enough signal —
+    /// `sk-ant-api03-abc` only has 9 (`api03-abc`) before the `.`. Per
+    /// spec this host is named unless it separately echoes a live
+    /// credential, which the second half of this test proves by reusing
+    /// the exact same host STRING as the client's real API key.
+    #[tokio::test]
+    async fn short_key_shape_is_named_unless_it_is_also_a_live_credential() {
+        let short_shape_host = "sk-ant-api03-abc.x.example";
+
+        let redirect_response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{short_shape_host}/steal\r\nContent-Length: 0\r\n\r\n"
+        );
+        let redirect_calls = Arc::new(AtomicUsize::new(0));
+        let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
+        match client.list_corpora().await {
+            Err(EnscriveError::Redirected { location_host, .. }) => {
+                assert_eq!(
+                    location_host, short_shape_host,
+                    "a too-short key shape must not be redacted by shape alone"
+                );
+            }
+            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
+
+        let redirect_response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{short_shape_host}/steal\r\nContent-Length: 0\r\n\r\n"
+        );
+        let redirect_calls = Arc::new(AtomicUsize::new(0));
+        let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+        // Same host string, but now it IS the live API key (rule 1, not
+        // rule 2 — this must still redact).
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), short_shape_host);
+        match client.list_corpora().await {
+            Err(EnscriveError::Redirected { location_host, .. }) => {
+                assert_eq!(
+                    location_host, "<redacted host>",
+                    "a live credential must redact even when its shape alone would not"
+                );
+            }
+            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
+    }
+
+    /// ENS-6483 R1 L1: the opaque-run threshold is 32, not 24 — a run of
+    /// exactly 31 stays named, 32 is redacted, with no key-shape prefix
+    /// and no live-credential overlap so only rule 3 can be responsible
+    /// either way.
+    #[tokio::test]
+    async fn opaque_run_boundary_is_32_not_24() {
+        let run_31 = "a".repeat(31);
+        let run_32 = "a".repeat(32);
+
+        for (run, expect_redacted) in [(run_31, false), (run_32, true)] {
+            let host = format!("{run}.example.com");
+            let redirect_response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{host}/steal\r\nContent-Length: 0\r\n\r\n"
+            );
+            let redirect_calls = Arc::new(AtomicUsize::new(0));
+            let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+            let client = EnscriveClient::new(format!("http://{redirect_addr}"), "unrelated-key");
+
+            match client.list_corpora().await {
+                Err(EnscriveError::Redirected { location_host, .. }) => {
+                    if expect_redacted {
+                        assert_eq!(
+                            location_host, "<redacted host>",
+                            "a run of {} chars should be redacted",
+                            run.len()
+                        );
+                    } else {
+                        assert_eq!(
+                            location_host, host,
+                            "a run of {} chars should stay named",
+                            run.len()
+                        );
+                    }
+                }
+                other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+            }
+        }
+    }
+
     /// An ordinary hyphenated hostname — an ALB name or a plain
     /// "network-edge"-style host — must NOT be redacted. Before the
-    /// label-anchored/hyphen-breaks-a-run fix, both tripped the heuristic:
-    /// "network-edge" contains "rk-" as a bare substring
-    /// ("netwo**rk-**edge"), and the ALB name's hyphenated segments run
-    /// past 24 alnum characters when hyphens don't break the count.
+    /// hyphen-breaks-a-run fix, both tripped the heuristic: the ALB name's
+    /// hyphenated segments run past 24 alnum characters when hyphens don't
+    /// break the count (now 32, and still broken by '-'/'.' either way).
+    /// "network-edge" never matched the prefix check even before this fix
+    /// (its "rk-" substring is mid-word, not label-initial), but it stays
+    /// a useful regression case for the boundary-anchoring behavior too.
     #[tokio::test]
     async fn redirect_error_does_not_redact_ordinary_hyphenated_hosts() {
         for ordinary_host in [
@@ -606,5 +748,119 @@ mod redirect_tests {
 
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// ENS-6483 R1 L2(a): `ping()` has its own 3xx check, separate from
+    /// `send_typed`'s — this proves it independently, the same way
+    /// `redirect_is_refused_and_target_is_never_contacted` proves it for
+    /// `send_typed` via `list_corpora()`. Without a dedicated test, a
+    /// change that deleted `ping()`'s own `is_redirection()` branch would
+    /// leave every other test passing while `ping()` silently reported a
+    /// 3xx as a successful status.
+    #[tokio::test]
+    async fn ping_refuses_a_redirect_and_never_contacts_the_target() {
+        let target_calls = Arc::new(AtomicUsize::new(0));
+        let target_addr = spawn_mock(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_string(),
+            target_calls.clone(),
+        );
+
+        let redirect_calls = Arc::new(AtomicUsize::new(0));
+        let redirect_response = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_addr}/v1/corpora\r\nContent-Length: 0\r\n\r\n"
+        );
+        let redirect_addr = spawn_mock(redirect_response, redirect_calls.clone());
+
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), "test-secret-key");
+        let result = client.ping().await;
+
+        match result {
+            Err(EnscriveError::Redirected { status, .. }) => {
+                assert_eq!(status.as_u16(), 307);
+            }
+            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
+        assert_eq!(
+            redirect_calls.load(Ordering::SeqCst),
+            1,
+            "redirecting server was never hit"
+        );
+        assert_eq!(
+            target_calls.load(Ordering::SeqCst),
+            0,
+            "ping()'s redirect target was contacted — X-API-Key may have been resent"
+        );
+    }
+
+    /// ENS-6483 R1 L2(b): the embedding-provider/BYOK key must be
+    /// redacted the same way the API key is — `with_provider_key` passes
+    /// it into `credentials` alongside `api_key` (see `send_typed`), but
+    /// nothing previously exercised that specific slot. Deliberately
+    /// leaves the Location host free of the API key, so this can only
+    /// pass because the provider key is checked too.
+    #[tokio::test]
+    async fn redirect_error_redacts_a_host_that_contains_the_provider_key() {
+        let live_provider_key = "provider-byok-secret-99";
+        let redirect_response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{live_provider_key}.attacker.example/steal\r\nContent-Length: 0\r\n\r\n"
+        );
+        let redirect_calls = Arc::new(AtomicUsize::new(0));
+        let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+
+        let client = EnscriveClient::with_provider_key(
+            format!("http://{redirect_addr}"),
+            "unrelated-api-key",
+            Some(live_provider_key),
+        );
+        let result = client.list_corpora().await;
+
+        match result {
+            Err(EnscriveError::Redirected { location_host, .. }) => {
+                assert_eq!(location_host, "<redacted host>");
+                assert!(
+                    !location_host.contains(live_provider_key),
+                    "the live provider key leaked into the error message"
+                );
+            }
+            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
+    }
+
+    /// ENS-6483 R1 L2(c): `EnscriveError::Redirected` carries only
+    /// `status` and `location_host` (see error.rs) — a 3xx response body
+    /// can never reach it structurally. This test still gives that
+    /// invariant an explicit regression check: the mock redirect response
+    /// carries a body with a sentinel value a credential-bearing payload
+    /// might contain, and neither the error's Display nor its Debug
+    /// output may ever contain it.
+    #[tokio::test]
+    async fn redirected_error_never_carries_the_3xx_body() {
+        let sentinel = "leaked-3xx-body-sentinel-do-not-log-me";
+        let body = format!("{{\"error\":\"see other\",\"detail\":\"{sentinel}\"}}");
+        let redirect_response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://example.invalid/steal\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let redirect_calls = Arc::new(AtomicUsize::new(0));
+        let redirect_addr = spawn_mock(redirect_response, redirect_calls);
+
+        let client = EnscriveClient::new(format!("http://{redirect_addr}"), "test-secret-key");
+        let result = client.list_corpora().await;
+
+        match result {
+            Err(err @ EnscriveError::Redirected { .. }) => {
+                let displayed = err.to_string();
+                let debugged = format!("{err:?}");
+                assert!(
+                    !displayed.contains(sentinel),
+                    "3xx body sentinel leaked into the Display message: {displayed}"
+                );
+                assert!(
+                    !debugged.contains(sentinel),
+                    "3xx body sentinel leaked into the Debug message: {debugged}"
+                );
+            }
+            other => panic!("expected Err(EnscriveError::Redirected), got {other:?}"),
+        }
     }
 }

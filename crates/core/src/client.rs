@@ -305,21 +305,37 @@ fn redirect_error(response: &reqwest::Response, credentials: &[&str]) -> Enscriv
 /// and none of their hyphen/dot-separated segments reach the suffix or
 /// run-length thresholds.
 fn host_looks_credential_shaped(host_lower: &str) -> bool {
-    // The fleet spec's generic vendor/platform prefixes (a plain prefix
-    // string; each needs MIN_KEY_SUFFIX_LEN more suffix characters to
-    // count — see below).
+    // Generic vendor/platform prefixes (a plain prefix string; each needs
+    // MIN_KEY_SUFFIX_LEN more suffix characters to count — see below). The
+    // fleet spec's own list is a FLOOR, not an exact set: redacting more
+    // genuine credential shapes is the safe direction, and the boundary
+    // anchor plus the 16-char suffix requirement keep false positives on
+    // ordinary hosts negligible either way. This list is therefore a
+    // superset of the spec's minimum.
     const KEY_PREFIXES: &[&str] = &[
         "sk-ant-",
         "sk-proj-",
         "sk-",
+        "sk_",
         "rk-",
         "pk-",
+        // Slack: one letter after "xox" names the token class (a = app,
+        // b = bot, p = user/legacy, r = refresh, s = workspace). Bare
+        // "xox-" is deliberately excluded — with no letter to require, it
+        // would match any ordinary "xox..." substring at a boundary too.
+        "xoxa-",
         "xoxb-",
         "xoxp-",
+        "xoxr-",
+        "xoxs-",
         "ghp_",
         "gho_",
+        "ghu_",
+        "ghs_",
         "github_pat_",
         "aiza",
+        "ya29.",
+        "glpat-",
         "npg_",
     ];
     const MIN_KEY_SUFFIX_LEN: usize = 16;
@@ -711,6 +727,13 @@ mod redirect_tests {
         for ordinary_host in [
             "my-keycloak-loadbalancer-1234567890.us-east-1.elb.amazonaws.com",
             "network-edge.example.com",
+            // ENS-6483 (prefix-floor follow-up): "sk_" and "glpat-" are
+            // now in KEY_PREFIXES too, but only at a boundary — neither
+            // substring below starts right after a non-alphanumeric
+            // character (or the string start), so the boundary check
+            // must keep these named exactly like "network-edge" above.
+            "desk_top.example",
+            "myglpat-service.example",
         ] {
             let redirect_response = format!(
                 "HTTP/1.1 302 Found\r\nLocation: http://{ordinary_host}/steal\r\nContent-Length: 0\r\n\r\n"

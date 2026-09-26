@@ -223,6 +223,30 @@ pub fn redact_excerpt(text: &str, credentials: &[&str], max_chars: usize) -> Str
     out.chars().take(max_chars).collect()
 }
 
+/// Redact decoded JSON strings and credential-shaped object keys in place.
+/// Live credentials apply to string values; object keys use shape rules only.
+pub fn redact_json_value(value: &mut serde_json::Value, credentials: &[&str]) {
+    match value {
+        serde_json::Value::String(text) => {
+            *text = redact_excerpt(text, credentials, usize::MAX);
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_json_value(value, credentials);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let old_object = std::mem::take(object);
+            for (key, mut value) in old_object {
+                redact_json_value(&mut value, credentials);
+                let key = redact_excerpt(&key, &[], usize::MAX);
+                object.insert(key, value);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +282,19 @@ mod tests {
             out.contains("[redacted]"),
             "expected a redaction marker: {out}"
         );
+    }
+
+    #[test]
+    fn redact_json_value_redacts_decoded_strings_and_shaped_object_keys() {
+        let mut value: serde_json::Value = serde_json::from_str(
+            r#"{"credential":"test-secret-key-42","sk-proj-abcdefghijklmnop":"ordinary"}"#,
+        )
+        .expect("valid JSON fixture");
+
+        redact_json_value(&mut value, &["test-secret-key-42"]);
+
+        assert_eq!(value["credential"], "[redacted]");
+        assert_eq!(value["[redacted]"], "ordinary");
+        assert!(!value.to_string().contains("test-secret-key-42"));
     }
 }

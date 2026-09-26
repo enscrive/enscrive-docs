@@ -5,7 +5,7 @@
 
 use crate::error::{EnscriveError, Result};
 use crate::jobs_polling::{PollConfig, await_job_terminal};
-use crate::redact::{host_looks_credential_shaped, redact_excerpt};
+use crate::redact::{host_looks_credential_shaped, redact_excerpt, redact_json_value};
 use crate::types::{
     CorpusDetail, CreateCorpusRequest, CreateVoiceApiRequest, DeleteCorpusResponse,
     DeleteVoiceResponse, ImportJobStatus, IngestRequest, IngestSummary, JobLaunchResponse,
@@ -105,14 +105,17 @@ impl EnscriveClient {
             // the shape rules, and bound like every other non-redirect
             // error excerpt in the fleet, before it ever reaches
             // EnscriveError::Http.
-            let excerpt = redact_excerpt(
-                &text,
-                &[
-                    self.api_key.as_str(),
-                    self.embedding_provider_key.as_deref().unwrap_or(""),
-                ],
-                200,
-            );
+            let credentials = [
+                self.api_key.as_str(),
+                self.embedding_provider_key.as_deref().unwrap_or(""),
+            ];
+            let excerpt = match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(mut value) => {
+                    redact_json_value(&mut value, &credentials);
+                    redact_excerpt(&value.to_string(), &[], 200)
+                }
+                Err(_) => redact_excerpt(&text, &credentials, 200),
+            };
             return Err(EnscriveError::Http {
                 status,
                 body: excerpt,
@@ -797,6 +800,28 @@ mod redirect_tests {
             other => panic!("expected Err(EnscriveError::Http), got {other:?}"),
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn http_error_body_redacts_live_key_escaped_in_json() {
+        let live_api_key = "test-secret-key-42";
+        let body = r#"{"error":"invalid key","detail":"test-secret-key-\u0034\u0032"}"#;
+        assert!(!body.contains(live_api_key), "fixture must use JSON escapes");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_mock(
+            format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+            calls,
+        );
+
+        let client = EnscriveClient::new(format!("http://{addr}"), live_api_key);
+        let error = client.list_corpora().await.unwrap_err().to_string();
+
+        assert!(!error.contains(live_api_key), "live API key leaked: {error}");
+        assert!(error.contains("[redacted]"), "missing redaction marker: {error}");
     }
 
     /// ENS-6483 R1 L2(a): `ping()` has its own 3xx check, separate from

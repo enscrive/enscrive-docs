@@ -104,8 +104,7 @@ async fn tune(global: GlobalArgs, args: TuneArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    let new_config: VoiceConfigApi =
-        toml::from_str(&edited_stripped).map_err(|e| format!("parse edited TOML: {e}"))?;
+    let new_config = parse_edited_voice_config(&edited_stripped)?;
 
     let updated = client
         .update_voice(&fresh.id, &UpdateVoiceApiRequest { config: new_config })
@@ -124,6 +123,24 @@ async fn tune(global: GlobalArgs, args: TuneArgs) -> Result<(), String> {
         updated.version
     );
     Ok(())
+}
+
+fn parse_edited_voice_config(edited: &str) -> Result<VoiceConfigApi, String> {
+    toml::from_str(edited).map_err(|error: toml::de::Error| {
+        match error.span().and_then(|span| edited.get(..span.start)) {
+            Some(prefix) => {
+                let line = prefix.bytes().filter(|&byte| byte == b'\n').count() + 1;
+                let column = prefix
+                    .rsplit_once('\n')
+                    .map_or(prefix.chars().count(), |(_, last_line)| {
+                        last_line.chars().count()
+                    })
+                    + 1;
+                format!("edited voice config is not valid TOML (line {line}, column {column})")
+            }
+            None => "edited voice config is not valid TOML".to_string(),
+        }
+    })
 }
 
 /// Write `initial` to a temp file, invoke `$EDITOR` (fallback: vi), read back.
@@ -157,4 +174,20 @@ fn open_in_editor(initial: &str, voice_name: &str) -> Result<String, String> {
 fn looks_like_our_header(line: &str) -> bool {
     let trimmed = line.trim_start();
     trimmed.starts_with("# enscrive-docs voice tune") || trimmed.starts_with("# Save + exit")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_edited_toml_does_not_echo_offending_text() {
+        let sentinel = "fake-provider-sentinel-42";
+        let edited = format!("provider_token = \"{sentinel}");
+
+        let error = parse_edited_voice_config(&edited).unwrap_err();
+
+        assert!(error.starts_with("edited voice config is not valid TOML"));
+        assert!(!error.contains(sentinel), "parser text leaked: {error}");
+    }
 }

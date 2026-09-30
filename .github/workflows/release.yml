@@ -11,9 +11,24 @@ name: release
 # also creates the GitHub Release, so it alone keeps `contents: write`.
 # `sign` re-downloads the S3 objects and re-verifies them against the same
 # verified line before signing anything. `id-token: write` is granted only
-# to publish, aggregate and sign. No release job has a concurrency group, and
-# no release job restores an actions/cache entry (neither the cargo build
-# cache nor the cosign tool binary).
+# to publish, aggregate and sign. No release job restores an actions/cache
+# entry (neither the cargo build cache nor the cosign tool binary).
+#
+# Concurrency, idempotent S3 writes, rerun-safe artifacts, main-ancestry
+# check (RELSPLIT-D, fleet fix following ctt #59/#61): the whole workflow
+# shares a `release-<tag>` group with `cancel-in-progress: false`, so two
+# dispatches for the SAME tag run one at a time instead of interleaving --
+# without this, one run's publish could upload the binary while a second
+# run's aggregate/sign reads and signs it, mixing generations. Every
+# S3-writing step (publish's binary/sidecar upload, aggregate's canonical
+# AND compat-alias SHA256SUMS uploads, sign's bundle uploads) uses
+# conditional create (`--if-none-match`) and only accepts an existing
+# object if it independently verifies against this run's own
+# digest/identity, so even a legitimate retry cannot silently clobber or
+# mix generations. `publish` verifies, before configuring AWS credentials,
+# that the tagged commit (GITHUB_SHA) is protected main's head or an
+# ancestor of it (GitHub compare API), so a tag push cannot release a
+# commit that never reached protected main.
 
 on:
     push:
@@ -28,6 +43,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.ref_name || github.ref_name }}
+  cancel-in-progress: false
 
 env:
   AWS_REGION: us-east-2
@@ -119,6 +138,13 @@ jobs:
             dist/${{ env.BINARY_NAME }}-${{ matrix.target }}.sha256
           if-no-files-found: error
           retention-days: 7
+          # overwrite: true so "re-run failed jobs"/"re-run all jobs" does
+          # not die on a "name already exists" collision -- v4.6.2 (this
+          # pinned commit) supports it. publish still independently
+          # re-hashes whatever it downloads against this step's own
+          # recorded sha256, so a replaced, non-identical build fails
+          # closed there, not silently.
+          overwrite: true
 
   # ---------------------------------------------------------------------------
   # Security wave 3 (ENS-6471): publish has the OIDC permission needed for S3.
@@ -265,6 +291,27 @@ jobs:
           echo "Verified SHA256 records:"
           printf '%s\n' "${VERIFIED_LINES[@]}"
 
+      - name: Verify tagged commit reached protected main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A tag push can name ANY commit -- tag-push access alone would
+          # otherwise let anyone release a commit that never reached
+          # protected main. GITHUB_SHA is the commit this tag points to.
+          # Ancestor check (compare status in {identical, behind}), not
+          # equality: a retry after main has advanced past this commit
+          # still succeeds instead of leaving a partially-published tag
+          # stuck forever, while a force-push rewrite still fails closed
+          # (neither identical to nor an ancestor of the new head).
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/branches/main" --jq 'select(.protected == true) | .name')" = "main"
+          MAIN_COMPARE_STATUS="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}" --jq '.status')"
+          case "${MAIN_COMPARE_STATUS}" in
+            identical|behind) : ;;
+            *) echo "::error::tagged commit ${GITHUB_SHA} is not protected main's head or an ancestor of it (compare status: ${MAIN_COMPARE_STATUS})"; exit 1 ;;
+          esac
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
@@ -281,15 +328,57 @@ jobs:
             echo "::error::verified-targets.txt is empty"
             exit 1
           fi
+
+          # Conditional creation: an existing object is never silently
+          # overwritten. On a 412 conflict -- a concurrent run for the same
+          # tag that won the race despite the workflow-level concurrency
+          # group, or a re-run after a partial failure -- fetch the existing
+          # object and continue ONLY if it already matches this run's
+          # independently verified digest; otherwise this tag is genuinely
+          # contested and the run fails rather than silently mixing
+          # generations across runs.
+          put_or_verify_existing() {
+            local key="$1" body="$2" expected_hash="$3" err tmp actual
+            err="$(mktemp)"
+            if aws s3api put-object --bucket "${S3_BUCKET}" --key "${key}" \
+                --body "${body}" --if-none-match '*' \
+                --cache-control "public, max-age=31536000, immutable" \
+                >/dev/null 2>"${err}"; then
+              rm -f "${err}"
+              echo "Published ${key}."
+              return 0
+            fi
+            if grep -qi 'PreconditionFailed' "${err}"; then
+              rm -f "${err}"
+              echo "::warning::${key} already exists -- verifying it matches this run's verified digest"
+              tmp="$(mktemp)"
+              aws s3 cp "s3://${S3_BUCKET}/${key}" "${tmp}" --only-show-errors
+              actual="$(sha256sum "${tmp}" | cut -d' ' -f1)"
+              rm -f "${tmp}"
+              if [ "${actual}" != "${expected_hash}" ]; then
+                echo "::error::${key} already exists with a DIFFERENT digest (expected ${expected_hash}, got ${actual}) -- this tag is unusable; use a fresh one" >&2
+                return 1
+              fi
+              echo "${key} already published with the expected digest; continuing."
+              return 0
+            fi
+            echo "::error::failed to publish ${key}" >&2
+            cat "${err}" >&2
+            rm -f "${err}"
+            return 1
+          }
+
           while IFS= read -r TARGET; do
-            aws s3 cp \
+            BINARY_HASH="$(sha256sum "dist/${BINARY_NAME}-${TARGET}" | cut -d' ' -f1)"
+            SIDECAR_HASH="$(sha256sum "dist/${BINARY_NAME}-${TARGET}.sha256" | cut -d' ' -f1)"
+            put_or_verify_existing \
+              "releases/${CHANNEL}/${REF_NAME}/${TARGET}/${BINARY_NAME}" \
               "dist/${BINARY_NAME}-${TARGET}" \
-              "s3://${S3_BUCKET}/releases/${CHANNEL}/${REF_NAME}/${TARGET}/${BINARY_NAME}" \
-              --cache-control "public, max-age=31536000, immutable"
-            aws s3 cp \
+              "${BINARY_HASH}"
+            put_or_verify_existing \
+              "releases/${CHANNEL}/${REF_NAME}/${TARGET}/${BINARY_NAME}.sha256" \
               "dist/${BINARY_NAME}-${TARGET}.sha256" \
-              "s3://${S3_BUCKET}/releases/${CHANNEL}/${REF_NAME}/${TARGET}/${BINARY_NAME}.sha256" \
-              --cache-control "public, max-age=31536000, immutable"
+              "${SIDECAR_HASH}"
           done < verified-targets.txt
 
   aggregate:
@@ -376,22 +465,57 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          CANONICAL_KEY="releases/${CHANNEL}/${REF_NAME}/${BINARY_NAME}/SHA256SUMS"
+
+          # Conditional creation: an existing object is never silently
+          # overwritten. On a 412 conflict -- a concurrent run for the same
+          # tag that won the race despite the workflow-level concurrency
+          # group, or a re-run after a partial failure -- fetch the existing
+          # object and continue ONLY if it already matches this run's
+          # independently assembled SHA256SUMS; otherwise this tag is
+          # genuinely contested and the run fails rather than silently
+          # mixing generations across runs. Both the canonical and the
+          # compat-alias key hold the SAME bytes, so both use the same
+          # expected hash.
+          EXPECTED_HASH="$(sha256sum dist/SHA256SUMS | cut -d' ' -f1)"
+          put_or_verify_existing() {
+            local key="$1" err tmp actual
+            err="$(mktemp)"
+            if aws s3api put-object --bucket "${S3_BUCKET}" --key "${key}" \
+                --body "dist/SHA256SUMS" --if-none-match '*' \
+                --cache-control "public, max-age=31536000, immutable" \
+                >/dev/null 2>"${err}"; then
+              rm -f "${err}"
+              echo "Published ${key}."
+              return 0
+            fi
+            if grep -qi 'PreconditionFailed' "${err}"; then
+              rm -f "${err}"
+              echo "::warning::${key} already exists -- verifying it matches this run's assembled SHA256SUMS"
+              tmp="$(mktemp)"
+              aws s3 cp "s3://${S3_BUCKET}/${key}" "${tmp}" --only-show-errors
+              actual="$(sha256sum "${tmp}" | cut -d' ' -f1)"
+              rm -f "${tmp}"
+              if [ "${actual}" != "${EXPECTED_HASH}" ]; then
+                echo "::error::${key} already exists with a DIFFERENT digest (expected ${EXPECTED_HASH}, got ${actual}) -- this tag is unusable; use a fresh one" >&2
+                return 1
+              fi
+              echo "${key} already published with the expected digest; continuing."
+              return 0
+            fi
+            echo "::error::failed to publish ${key}" >&2
+            cat "${err}" >&2
+            rm -f "${err}"
+            return 1
+          }
 
           # The binary-name segment makes this checksum index unambiguous when
           # independently tagged repositories choose the same minute-based tag.
-          aws s3 cp \
-            dist/SHA256SUMS \
-            "s3://${S3_BUCKET}/${CANONICAL_KEY}" \
-            --cache-control "public, max-age=31536000, immutable"
+          put_or_verify_existing "releases/${CHANNEL}/${REF_NAME}/${BINARY_NAME}/SHA256SUMS"
 
           # Compatibility alias only. Core consumers identify an artifact by
           # its manifest URL + SHA-256 + repository-pinned cosign signature and
           # do not consume this shared checksum key.
-          aws s3 cp \
-            dist/SHA256SUMS \
-            "s3://${S3_BUCKET}/releases/${CHANNEL}/${REF_NAME}/SHA256SUMS" \
-            --cache-control "public, max-age=31536000, immutable"
+          put_or_verify_existing "releases/${CHANNEL}/${REF_NAME}/SHA256SUMS"
 
       - name: Invalidate CloudFront
         shell: bash
@@ -551,6 +675,53 @@ jobs:
           WORK_DIR="/tmp/cosign-work"
           mkdir -p "${WORK_DIR}"
 
+          # Idempotent bundle publication: on a 412 conflict -- a concurrent
+          # run for the same tag that won the race despite the
+          # workflow-level concurrency group, or a re-run after a partial
+          # failure -- an existing bundle is accepted only if it itself
+          # verifies with cosign against this run's exact identity for the
+          # bytes on hand -- never assumed good just because the key
+          # exists. cosign signatures are non-deterministic (a fresh Fulcio
+          # cert + Rekor entry every sign-blob call), so a freshly re-signed
+          # bundle can never byte-match one already published; on a
+          # verified conflict this moves the EXISTING bundle into place
+          # instead of discarding it, so the local file matches what S3
+          # actually serves.
+          put_bundle_or_verify_existing() {
+            local key="$1" bundle_path="$2" original_path="$3" err tmp
+            err="$(mktemp)"
+            if aws s3api put-object --bucket "${S3_BUCKET}" --key "${key}" \
+                --body "${bundle_path}" --if-none-match '*' \
+                --cache-control "public, max-age=31536000, immutable" \
+                >/dev/null 2>"${err}"; then
+              rm -f "${err}"
+              echo "Published ${key}."
+              return 0
+            fi
+            if grep -qi 'PreconditionFailed' "${err}"; then
+              rm -f "${err}"
+              echo "::warning::${key} already exists -- verifying it against the pinned identity"
+              tmp="$(mktemp)"
+              aws s3 cp "s3://${S3_BUCKET}/${key}" "${tmp}" --only-show-errors
+              if ! cosign verify-blob --bundle "${tmp}" \
+                  --certificate-identity-regexp '^https://github\.com/enscrive/enscrive-docs/\.github/workflows/release\.yml@refs/' \
+                  --certificate-github-workflow-sha "${GITHUB_SHA}" \
+                  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+                  "${original_path}"; then
+                rm -f "${tmp}"
+                echo "::error::${key} already exists but does not verify against the pinned identity -- this tag is unusable; use a fresh one" >&2
+                return 1
+              fi
+              mv "${tmp}" "${bundle_path}"
+              echo "${key} already published and verifies; using the existing bundle."
+              return 0
+            fi
+            echo "::error::failed to publish ${key}" >&2
+            cat "${err}" >&2
+            rm -f "${err}"
+            return 1
+          }
+
           mapfile -t LINES < <(printf '%s' "${VERIFIED_SHA256}")
           [ "${#LINES[@]}" -gt 0 ] || fail "publish supplied no verified SHA256 lines"
           declare -A EXPECTED=()
@@ -584,10 +755,7 @@ jobs:
             --certificate-identity-regexp '^https://github\.com/enscrive/enscrive-docs/\.github/workflows/release\.yml@refs/' \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${BINARY_LOCAL}"
-          aws s3 cp \
-            "${BINARY_LOCAL}.bundle" \
-            "s3://${S3_BUCKET}/${BINARY_KEY}.bundle" \
-            --cache-control "public, max-age=31536000, immutable"
+          put_bundle_or_verify_existing "${BINARY_KEY}.bundle" "${BINARY_LOCAL}.bundle" "${BINARY_LOCAL}"
 
           SUMS_KEY="releases/${CHANNEL}/${REF_NAME}/${BINARY_NAME}/SHA256SUMS"
           SUMS_LOCAL="${WORK_DIR}/SHA256SUMS"
@@ -604,10 +772,7 @@ jobs:
             --certificate-identity-regexp '^https://github\.com/enscrive/enscrive-docs/\.github/workflows/release\.yml@refs/' \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${SUMS_LOCAL}"
-          aws s3 cp \
-            "${SUMS_LOCAL}.bundle" \
-            "s3://${S3_BUCKET}/${SUMS_KEY}.bundle" \
-            --cache-control "public, max-age=31536000, immutable"
+          put_bundle_or_verify_existing "${SUMS_KEY}.bundle" "${SUMS_LOCAL}.bundle" "${SUMS_LOCAL}"
 
   # ---------------------------------------------------------------------------
   # ENS-538 — notify the release orchestrator that this tag has finished

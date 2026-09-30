@@ -626,6 +626,10 @@ jobs:
   # ---------------------------------------------------------------------------
   notify-orchestrator:
     name: notify release orchestrator (ENS-538)
+    # ENSCRIVE_ORCHESTRATOR_PAT lives only in the release-notify environment
+    # (deployment policy: tags v* only), so a workflow on any other ref cannot
+    # resolve it (L35 actions-secrets containment).
+    environment: release-notify
     needs: [build, publish, aggregate, sign]
     runs-on: ubuntu-latest
     if: success()

@@ -116,6 +116,18 @@ pub struct IngestDocument {
     pub fingerprint: String,
 }
 
+/// ENS-8269: how the server reconciles a document id that already has stored
+/// chunks (upstream `types-api` `IngestMode`, `rename_all = "lowercase"`).
+/// Absent from the request, the server applies `append`, which never removes
+/// a shortened document's tail.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum IngestMode {
+    #[default]
+    Append,
+    Replace,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct IngestRequest {
     pub corpus_id: String,
@@ -127,6 +139,10 @@ pub struct IngestRequest {
     pub sync: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_batch: Option<bool>,
+    /// ENS-8269: the reconciliation mode. `None` is not sent, and the server
+    /// then applies `append`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<IngestMode>,
 }
 
 /// Response from `POST /v1/ingest` under the async-by-default contract

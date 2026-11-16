@@ -19,7 +19,7 @@ pub use config::{
 pub use error::{EnscriveError, Result};
 pub use types::{
     CorpusDetail, CreateCorpusRequest, CreateVoiceApiRequest, DeleteCorpusResponse,
-    DeleteVoiceResponse, ImportJobStatus, IngestDocument, IngestRequest, IngestSummary,
+    DeleteVoiceResponse, ImportJobStatus, IngestDocument, IngestMode, IngestRequest, IngestSummary,
     JobLaunchResponse, SearchFilter, SearchQuery, SearchResultItem, SearchResults,
     SearchWithVoiceBody, UpdateVoiceApiRequest, VoiceConfigApi, VoiceDetail,
 };

@@ -2,7 +2,7 @@ use crate::global::GlobalArgs;
 use clap::Args;
 use enscrive_docs_core::redact::redact_excerpt;
 use enscrive_docs_core::{
-    Config, CorpusConfig, EnscriveClient, IngestDocument, IngestRequest, VoiceConfig,
+    Config, CorpusConfig, EnscriveClient, IngestDocument, IngestMode, IngestRequest, VoiceConfig,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -187,7 +187,7 @@ fn ingest_request(corpus_id: String, docs: Vec<IngestDocument>, voice_id: String
         dry_run: false,
         sync: None,
         no_batch: None,
-        mode: None,
+        mode: Some(IngestMode::Replace),
     }
 }
 

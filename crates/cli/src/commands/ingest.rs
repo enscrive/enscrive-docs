@@ -146,14 +146,7 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
         // accepts-and-ignores them and always answers 202 + JobLaunchResponse,
         // so the client no longer asks for either — `client.ingest()` posts,
         // then polls `GET /v1/jobs/{job_id}` to terminal itself.
-        let req = IngestRequest {
-            corpus_id,
-            documents: docs,
-            voice_id: Some(voice_id),
-            dry_run: false,
-            sync: None,
-            no_batch: None,
-        };
+        let req = ingest_request(corpus_id, docs, voice_id);
 
         println!("  job launched, polling to terminal...");
         match client.ingest(&req).await {
@@ -180,6 +173,22 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
 
     println!("\ndone: {total_docs} document(s) across {total_corpora} corpus(a)");
     Ok(())
+}
+
+/// ENS-8269: the one place the ingest request is built. The client sends
+/// `mode = "replace"` so a re-sent file is reconciled by document id: a
+/// shortened file's removed tail is deleted (its rent stops), and an
+/// unchanged file is neither re-embedded nor charged.
+fn ingest_request(corpus_id: String, docs: Vec<IngestDocument>, voice_id: String) -> IngestRequest {
+    IngestRequest {
+        corpus_id,
+        documents: docs,
+        voice_id: Some(voice_id),
+        dry_run: false,
+        sync: None,
+        no_batch: None,
+        mode: None,
+    }
 }
 
 fn format_warning_lines(warnings: &[String], credentials: &[&str]) -> Vec<String> {
@@ -278,7 +287,57 @@ fn fingerprint_content(content: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_warning_lines;
+    use super::{build_documents, format_warning_lines, ingest_request};
+    use enscrive_docs_core::{CorpusConfig, VoiceConfig};
+
+    fn ens8269_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ens8269-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test corpus dir");
+        dir
+    }
+
+    fn ens8269_corpus(root: &std::path::Path) -> CorpusConfig {
+        CorpusConfig {
+            name: "docs".to_string(),
+            voice: "neutral".to_string(),
+            path: root.to_path_buf(),
+            glob: "**/*.md".to_string(),
+            url_prefix: None,
+            embedding_model: None,
+            dimensions: None,
+            description: None,
+        }
+    }
+
+    fn ens8269_voice() -> VoiceConfig {
+        VoiceConfig {
+            name: "neutral".to_string(),
+            chunking_strategy: "paragraph".to_string(),
+            parameters: std::collections::HashMap::new(),
+            template_id: None,
+            score_threshold: None,
+            default_limit: None,
+            description: None,
+        }
+    }
+
+    fn ens8269_request(root: &std::path::Path) -> serde_json::Value {
+        let docs = build_documents(root, &ens8269_corpus(root), &ens8269_voice())
+            .expect("build documents");
+        serde_json::to_value(ingest_request(
+            "corpus-1".to_string(),
+            docs,
+            "voice-1".to_string(),
+        ))
+        .expect("request serializes")
+    }
 
     #[test]
     fn warning_lines_redact_provider_key_shapes() {
@@ -291,5 +350,65 @@ mod tests {
             vec!["  ! warning: provider rejected [redacted]".to_string()]
         );
         assert!(!lines[0].contains(&provider_key));
+    }
+
+    // ENS-8269 (1): a shortened file is re-sent under replace, so the server
+    // deletes its removed tail. Before the fix the request has no `mode`, and
+    // the server applies `append`, which never deletes the tail.
+    #[test]
+    fn ens8269_shortened_file_is_resent_under_replace() {
+        let root = ens8269_dir("shortened");
+        std::fs::write(root.join("a.md"), "one\n\ntwo\n\nthree\n").expect("write a.md");
+        let first = ens8269_request(&root);
+        std::fs::write(root.join("a.md"), "one\n").expect("shorten a.md");
+        let second = ens8269_request(&root);
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(second["mode"], "replace");
+        assert_eq!(second["documents"].as_array().map(Vec::len), Some(1));
+        assert_eq!(second["documents"][0]["id"], first["documents"][0]["id"]);
+        assert_eq!(second["documents"][0]["content"], "one\n");
+        assert_ne!(
+            second["documents"][0]["fingerprint"],
+            first["documents"][0]["fingerprint"]
+        );
+    }
+
+    // ENS-8269 (2): the client half only: an unchanged file is re-sent under
+    // replace with an equal id, content, metadata and fingerprint. Whether the
+    // server then embeds nothing depends on its stored rows (developer
+    // persist.rs :461-:470): rows written by an older chunker or model are
+    // re-embedded once on the first replace send.
+    #[test]
+    fn ens8269_unchanged_file_is_resent_under_replace_byte_equal() {
+        let root = ens8269_dir("unchanged");
+        std::fs::write(root.join("a.md"), "one\n\ntwo\n").expect("write a.md");
+        let first = ens8269_request(&root);
+        let second = ens8269_request(&root);
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(first["mode"], "replace");
+        assert_eq!(second["mode"], "replace");
+        assert_eq!(first["documents"], second["documents"]);
+    }
+
+    // ENS-8269 (3): two files, one edited: both are sent under replace, and
+    // the unedited one is equal to its first send, so only the edited one is
+    // re-embedded.
+    #[test]
+    fn ens8269_two_files_one_edited_both_sent_under_replace() {
+        let root = ens8269_dir("two");
+        std::fs::write(root.join("a.md"), "alpha\n").expect("write a.md");
+        std::fs::write(root.join("b.md"), "beta\n").expect("write b.md");
+        let first = ens8269_request(&root);
+        std::fs::write(root.join("b.md"), "beta edited\n").expect("edit b.md");
+        let second = ens8269_request(&root);
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(second["mode"], "replace");
+        assert_eq!(second["documents"].as_array().map(Vec::len), Some(2));
+        assert_eq!(second["documents"][0], first["documents"][0]);
+        assert_eq!(second["documents"][1]["id"], "b.md");
+        assert_ne!(
+            second["documents"][1]["fingerprint"],
+            first["documents"][1]["fingerprint"]
+        );
     }
 }

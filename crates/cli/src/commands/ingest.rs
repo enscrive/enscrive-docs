@@ -56,8 +56,11 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
         Some((client, corpora, voices, live_credentials))
     };
 
-    let mut total_docs = 0usize;
-    let mut total_corpora = 0usize;
+    // ENS-8269 (R3261): plan every selected entry BEFORE any ingest request.
+    // Under `mode = "replace"`, two entries that send the same document id to
+    // the same corpus would delete each other's content, so a duplicate
+    // (corpus, document id) refuses the whole run and nothing is sent.
+    let mut planned: Vec<PlannedEntry<'_>> = Vec::new();
     for entry in &cfg.corpora {
         if args
             .corpus
@@ -86,7 +89,35 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
             );
             continue;
         }
+        let target = match remote.as_ref() {
+            Some((_, corpora, _, _)) => corpora
+                .iter()
+                .find(|c| c.name == entry.name)
+                .map(|c| c.id.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "Enscrive corpus \"{}\" not found. Create it via the Enscrive UI or `enscrive corpus create` before ingesting.",
+                        entry.name
+                    )
+                })?,
+            None => entry.name.clone(),
+        };
+        planned.push(PlannedEntry {
+            entry,
+            docs,
+            target,
+        });
+    }
+    refuse_duplicate_targets(&planned)?;
 
+    let mut total_docs = 0usize;
+    let mut total_corpora = 0usize;
+    for PlannedEntry {
+        entry,
+        docs,
+        target,
+    } in planned
+    {
         if args.dry_run {
             println!(
                 "[{}] (dry-run) {} document(s) for voice \"{}\"",
@@ -107,22 +138,13 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
             continue;
         }
 
-        let (client, corpora, voices, live_credentials) =
+        let (client, _, voices, live_credentials) =
             remote.as_ref().expect("remote must exist when not dry-run");
         let credentials = live_credentials
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let corpus_id = corpora
-            .iter()
-            .find(|c| c.name == entry.name)
-            .map(|c| c.id.clone())
-            .ok_or_else(|| {
-                format!(
-                    "Enscrive corpus \"{}\" not found. Create it via the Enscrive UI or `enscrive corpus create` before ingesting.",
-                    entry.name
-                )
-            })?;
+        let corpus_id = target;
         let voice_id = voices
             .iter()
             .find(|v| v.name == entry.voice)
@@ -172,6 +194,38 @@ pub async fn run(global: GlobalArgs, args: IngestArgs) -> Result<(), String> {
     }
 
     println!("\ndone: {total_docs} document(s) across {total_corpora} corpus(a)");
+    Ok(())
+}
+
+/// ENS-8269 (R3261): one selected `[[corpora]]` entry, planned before any
+/// ingest request. `target` is the resolved corpus id (the entry's name on
+/// `--dry-run`, which resolves nothing remotely).
+struct PlannedEntry<'a> {
+    entry: &'a CorpusConfig,
+    docs: Vec<IngestDocument>,
+    target: String,
+}
+
+/// ENS-8269 (R3261): every (corpus, document id) the run would send, over ALL
+/// selected entries, is unique, or the whole run is refused before any
+/// request. Under replace, a second send of one document id deletes the
+/// first send's content; the same root listed twice falls here too. A refusal
+/// sends nothing, so it charges nothing.
+fn refuse_duplicate_targets(planned: &[PlannedEntry<'_>]) -> Result<(), String> {
+    let mut seen: HashMap<(&str, &str), &CorpusConfig> = HashMap::new();
+    for plan in planned {
+        for doc in &plan.docs {
+            if let Some(first) = seen.insert((plan.target.as_str(), doc.id.as_str()), plan.entry) {
+                return Err(format!(
+                    "refusing to ingest: document \"{}\" would be sent to corpus \"{}\" from two configured roots ({} and {}); under replace the later send would delete the earlier one's content. Nothing was sent.",
+                    doc.id,
+                    plan.entry.name,
+                    first.path.display(),
+                    plan.entry.path.display()
+                ));
+            }
+        }
+    }
     Ok(())
 }
 

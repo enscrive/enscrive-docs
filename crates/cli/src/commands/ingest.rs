@@ -534,4 +534,249 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(result, Ok(()));
     }
+
+    // ENS-8269 (R3269): the LIVE path, against a local mock API. The two rows
+    // above run `--dry-run`, where the planned target is the entry's NAME and
+    // nothing is sent, so a refusal checked only under dry-run would leave
+    // them green. These rows run `run` with dry-run OFF, resolve the corpus
+    // ids from GET /v1/corpora, and count the ingest requests the mock gets.
+    type Ens8269Log = std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>;
+
+    struct Ens8269Mock {
+        endpoint: String,
+        requests: Ens8269Log,
+    }
+
+    impl Ens8269Mock {
+        fn count(&self, method: &str, path: &str) -> usize {
+            self.requests
+                .lock()
+                .expect("mock request log")
+                .iter()
+                .filter(|(m, p, _)| m == method && p == path)
+                .count()
+        }
+
+        fn ingest_bodies(&self) -> Vec<serde_json::Value> {
+            self.requests
+                .lock()
+                .expect("mock request log")
+                .iter()
+                .filter(|(m, p, _)| m == "POST" && p == "/v1/ingest")
+                .map(|(_, _, body)| serde_json::from_str(body).expect("ingest body is JSON"))
+                .collect()
+        }
+    }
+
+    // A mock Enscrive API on 127.0.0.1, one request per connection
+    // (`Connection: close`). GET /v1/corpora returns `corpora` as (name, id);
+    // the voice `neutral` is `voice-1`; every POST /v1/ingest launches a job
+    // that the first GET /v1/jobs/{id} reports `completed`.
+    fn ens8269_mock(corpora: &[(&str, &str)]) -> Ens8269Mock {
+        use std::io::{Read, Write};
+        let corpora_json = serde_json::Value::Array(
+            corpora
+                .iter()
+                .map(|(name, id)| serde_json::json!({ "id": id, "name": name }))
+                .collect(),
+        )
+        .to_string();
+        let voices_json = serde_json::json!([{
+            "id": "voice-1",
+            "name": "neutral",
+            "config": { "chunking_strategy": "paragraph" }
+        }])
+        .to_string();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock listener");
+        let endpoint = format!("http://{}", listener.local_addr().expect("mock address"));
+        let requests: Ens8269Log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = requests.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut seen: Vec<u8> = Vec::new();
+                let mut buf = [0u8; 4096];
+                let header_end = loop {
+                    if let Some(at) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break Some(at + 4);
+                    }
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break None,
+                        Ok(n) => seen.extend_from_slice(&buf[..n]),
+                    }
+                };
+                let Some(header_end) = header_end else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&seen[..header_end]).into_owned();
+                let mut words = head.split_whitespace();
+                let method = words.next().unwrap_or("").to_string();
+                let path = words.next().unwrap_or("").to_string();
+                let length = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        if name.trim().eq_ignore_ascii_case("content-length") {
+                            value.trim().parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                while seen.len() < header_end + length {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => seen.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let end = seen.len().min(header_end + length);
+                let body = String::from_utf8_lossy(&seen[header_end..end]).into_owned();
+                let posts = {
+                    let mut log = log.lock().expect("mock request log");
+                    log.push((method.clone(), path.clone(), body));
+                    log.iter()
+                        .filter(|(m, p, _)| m == "POST" && p == "/v1/ingest")
+                        .count()
+                };
+                let (status, reply) = match (method.as_str(), path.as_str()) {
+                    ("GET", "/v1/corpora") => ("200 OK", corpora_json.clone()),
+                    ("GET", "/v1/voices") => ("200 OK", voices_json.clone()),
+                    ("POST", "/v1/ingest") => (
+                        "202 Accepted",
+                        serde_json::json!({
+                            "job_id": format!("job-{posts}"),
+                            "status": "pending",
+                            "poll_url": format!("/v1/jobs/job-{posts}")
+                        })
+                        .to_string(),
+                    ),
+                    ("GET", p) if p.starts_with("/v1/jobs/") => (
+                        "200 OK",
+                        serde_json::json!({
+                            "id": p.trim_start_matches("/v1/jobs/"),
+                            "status": "completed",
+                            "documents_ingested": 1,
+                            "documents_failed": 0
+                        })
+                        .to_string(),
+                    ),
+                    _ => ("404 Not Found", "{}".to_string()),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        Ens8269Mock { endpoint, requests }
+    }
+
+    // One `[[corpora]]` entry per (name, root), in order; each root holds its
+    // own `intro.md` ("<root> intro").
+    fn ens8269_live_config(dir: &std::path::Path, entries: &[(&str, &str)]) -> std::path::PathBuf {
+        let mut config = String::from("[site]\ntitle = \"ens8269\"\n");
+        for (name, root) in entries {
+            std::fs::create_dir_all(dir.join(root)).expect("create root");
+            std::fs::write(dir.join(root).join("intro.md"), format!("{root} intro\n"))
+                .expect("write intro.md");
+            config.push_str(&format!(
+                "\n[[corpora]]\nname = \"{name}\"\nvoice = \"neutral\"\npath = \"{root}\"\n"
+            ));
+        }
+        config.push_str("\n[[voices]]\nname = \"neutral\"\nchunking_strategy = \"paragraph\"\n");
+        let path = dir.join("enscrive-docs.toml");
+        std::fs::write(&path, config).expect("write config");
+        path
+    }
+
+    async fn ens8269_live_run(
+        config_path: &std::path::Path,
+        mock: &Ens8269Mock,
+    ) -> Result<(), String> {
+        let global = crate::global::GlobalArgs {
+            config_path: Some(config_path.to_path_buf()),
+            api_key: Some("ens8269-test-key".to_string()),
+            endpoint: Some(mock.endpoint.clone()),
+            embedding_provider_key: None,
+            profile: None,
+        };
+        let args = super::IngestArgs {
+            corpus: None,
+            dry_run: false,
+            force: false,
+        };
+        super::run(global, args).await
+    }
+
+    // R3269 (a): an earlier entry that collides with nothing, then two roots
+    // that target ONE corpus with the same document id. Live, the run is
+    // refused before ANY ingest request, the earlier entry's included.
+    #[tokio::test]
+    async fn ens8269_live_collision_refuses_with_zero_ingest_requests() {
+        let dir = ens8269_dir("live-collide");
+        let config_path = ens8269_live_config(
+            &dir,
+            &[("guides", "root-c"), ("docs", "root-a"), ("docs", "root-b")],
+        );
+        let mock = ens8269_mock(&[("guides", "corpus-guides"), ("docs", "corpus-docs")]);
+        let result = ens8269_live_run(&config_path, &mock).await;
+        std::fs::remove_dir_all(&dir).ok();
+        let err = result.expect_err("a duplicate (corpus, document id) must refuse the live run");
+        assert!(err.contains("refusing to ingest"), "the refusal, not another error: {err}");
+        assert!(mock.count("GET", "/v1/corpora") >= 1, "the live path resolved the corpus ids");
+        assert_eq!(mock.count("POST", "/v1/ingest"), 0, "no ingest request is sent");
+    }
+
+    // R3269 (b), the control: the same file name under two roots that target
+    // TWO corpora. Live, EXACTLY two ingest requests go out, in config order,
+    // each naming its own resolved corpus id and carrying its own root's text.
+    #[tokio::test]
+    async fn ens8269_live_two_corpora_same_file_name_sends_exactly_two_requests() {
+        let dir = ens8269_dir("live-two");
+        let config_path = ens8269_live_config(&dir, &[("docs", "root-a"), ("guides", "root-b")]);
+        let mock = ens8269_mock(&[("docs", "corpus-docs"), ("guides", "corpus-guides")]);
+        let result = ens8269_live_run(&config_path, &mock).await;
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(result, Ok(()));
+        let bodies = mock.ingest_bodies();
+        assert_eq!(bodies.len(), 2, "exactly two ingest requests");
+        assert_eq!(bodies[0]["corpus_id"], "corpus-docs");
+        assert_eq!(bodies[1]["corpus_id"], "corpus-guides");
+        assert_eq!(bodies[0]["documents"].as_array().map(Vec::len), Some(1));
+        assert_eq!(bodies[1]["documents"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            bodies[0]["documents"][0]["id"], bodies[1]["documents"][0]["id"],
+            "the same document id goes to both corpora"
+        );
+        assert!(
+            bodies[0]["documents"][0]["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("root-a intro")),
+            "the first request carries root-a's text"
+        );
+        assert!(
+            bodies[1]["documents"][0]["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("root-b intro")),
+            "the second request carries root-b's text"
+        );
+    }
+
+    // R3269 (c): two corpus NAMES that resolve to ONE corpus id, the same file
+    // name under each root. Only the live path can see this (on dry-run the
+    // target is the name). Refused, with zero ingest requests.
+    #[tokio::test]
+    async fn ens8269_live_two_names_one_corpus_id_refuse_with_zero_ingest_requests() {
+        let dir = ens8269_dir("live-alias");
+        let config_path = ens8269_live_config(&dir, &[("docs", "root-a"), ("handbook", "root-b")]);
+        let mock = ens8269_mock(&[("docs", "corpus-shared"), ("handbook", "corpus-shared")]);
+        let result = ens8269_live_run(&config_path, &mock).await;
+        std::fs::remove_dir_all(&dir).ok();
+        let err = result.expect_err("two names resolving to one corpus id must refuse the live run");
+        assert!(err.contains("refusing to ingest"), "the refusal, not another error: {err}");
+        assert!(mock.count("GET", "/v1/corpora") >= 1, "the live path resolved the corpus ids");
+        assert_eq!(mock.count("POST", "/v1/ingest"), 0, "no ingest request is sent");
+    }
 }

@@ -747,8 +747,12 @@ mod tests {
         assert_eq!(bodies[0]["documents"].as_array().map(Vec::len), Some(1));
         assert_eq!(bodies[1]["documents"].as_array().map(Vec::len), Some(1));
         assert_eq!(
-            bodies[0]["documents"][0]["id"], bodies[1]["documents"][0]["id"],
-            "the same document id goes to both corpora"
+            bodies[0]["documents"][0]["id"], "intro.md",
+            "the first request carries the file's own document id"
+        );
+        assert_eq!(
+            bodies[1]["documents"][0]["id"], "intro.md",
+            "the second request carries the file's own document id"
         );
         assert!(
             bodies[0]["documents"][0]["content"]
@@ -775,6 +779,26 @@ mod tests {
         let result = ens8269_live_run(&config_path, &mock).await;
         std::fs::remove_dir_all(&dir).ok();
         let err = result.expect_err("two names resolving to one corpus id must refuse the live run");
+        assert!(err.contains("refusing to ingest"), "the refusal, not another error: {err}");
+        assert!(mock.count("GET", "/v1/corpora") >= 1, "the live path resolved the corpus ids");
+        assert_eq!(mock.count("POST", "/v1/ingest"), 0, "no ingest request is sent");
+    }
+
+    // r4 (Sol 6.1 P1 :721): the two colliding entries are NOT adjacent: a
+    // non-colliding entry sits between them (A, B, A). The check must hold
+    // over the whole run, not only between neighbours. Refused, with zero
+    // ingest requests, the earlier entries' included.
+    #[tokio::test]
+    async fn ens8269_live_nonadjacent_collision_refuses_with_zero_ingest_requests() {
+        let dir = ens8269_dir("live-nonadjacent");
+        let config_path = ens8269_live_config(
+            &dir,
+            &[("docs", "root-a"), ("guides", "root-c"), ("docs", "root-b")],
+        );
+        let mock = ens8269_mock(&[("docs", "corpus-docs"), ("guides", "corpus-guides")]);
+        let result = ens8269_live_run(&config_path, &mock).await;
+        std::fs::remove_dir_all(&dir).ok();
+        let err = result.expect_err("a non-adjacent duplicate (corpus, document id) must refuse the live run");
         assert!(err.contains("refusing to ingest"), "the refusal, not another error: {err}");
         assert!(mock.count("GET", "/v1/corpora") >= 1, "the live path resolved the corpus ids");
         assert_eq!(mock.count("POST", "/v1/ingest"), 0, "no ingest request is sent");

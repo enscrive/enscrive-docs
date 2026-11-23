@@ -83,7 +83,9 @@ flowchart TD
 **Key invariant:** the `enscrive-docs` client sends raw markdown content and a
 SHA-256 fingerprint. All chunking and embedding happen server-side. The fingerprint
 lets the Enscrive API detect unchanged documents and skip re-embedding them —
-this is what makes `ingest` idempotent on unchanged files.
+this is what makes `ingest` idempotent on unchanged files, under a deterministic
+chunking strategy only. Under a story_beats or generative voice every send
+re-embeds and charges every chunk (ENS-8356).
 
 ## Serve + Search Pipeline
 

@@ -56,8 +56,10 @@ idempotent — re-running against an existing tenant skips any voice or corpus t
 already exists and just re-ingests. Pass `--skip-ingest` if you only want to provision
 the voice + corpus without pushing content yet.
 
-Enscrive deduplicates by content fingerprint, so `enscrive-docs ingest` on unchanged
-files is effectively free.
+Enscrive deduplicates by content fingerprint, so under a deterministic chunking
+strategy `enscrive-docs ingest` on unchanged files is effectively free. Under a
+story_beats or generative voice every send re-embeds and charges every chunk
+(ENS-8356).
 
 ## 4. Serve
 

@@ -314,7 +314,7 @@ enscrive-docs search "getting started"
 enscrive-docs watch
 
 # 7. After editing docs, re-push changed files
-enscrive-docs ingest          # only changed files pay embedding cost
+enscrive-docs ingest          # only changed files pay embedding cost (deterministic chunking only; a story_beats or generative voice re-embeds every chunk, ENS-8356)
 
 # 8. Tune retrieval quality
 enscrive-docs voice tune guides-voice   # opens in $EDITOR

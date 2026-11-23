@@ -97,8 +97,10 @@ enscrive-docs ingest --force                  # ⚠️ declared but NOT IMPLEMEN
 5. Prints per-corpus success/failure counts.
 
 **Fingerprint behavior:** The SHA-256 fingerprint is sent per document. Enscrive
-uses it server-side to skip re-embedding unchanged documents. You pay embedding
-cost only for new or modified files.
+uses it server-side to skip re-embedding unchanged documents. Under a
+deterministic chunking strategy you pay embedding cost only for new or modified
+files. Under a story_beats or generative voice every send re-embeds and charges
+every chunk (ENS-8356).
 
 **`--dry-run`:** Does not contact the Enscrive API. Walks the file tree and prints
 what would be ingested (paths, byte sizes, fingerprint prefixes). Useful for

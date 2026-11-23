@@ -72,7 +72,9 @@ Click any result and the browser scrolls to and highlights the matching passage.
 
 As your docs evolve:
 
-- `enscrive-docs ingest` pushes new or changed files; unchanged files skip.
+- `enscrive-docs ingest` pushes new or changed files; unchanged files skip under a
+  deterministic chunking strategy (a story_beats or generative voice re-embeds and
+  charges every chunk on every send, ENS-8356).
 - `enscrive-docs voice tune <voice>` opens the voice config in `$EDITOR`, validates
   your edits, and `PUT`s the new version. Use this to dial in `score_threshold`,
   chunking parameters, or the template prompt once you see real search behavior.

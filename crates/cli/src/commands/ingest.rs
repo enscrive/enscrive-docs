@@ -231,8 +231,10 @@ fn refuse_duplicate_targets(planned: &[PlannedEntry<'_>]) -> Result<(), String> 
 
 /// ENS-8269: the one place the ingest request is built. The client sends
 /// `mode = "replace"` so a re-sent file is reconciled by document id: a
-/// shortened file's removed tail is deleted (its rent stops), and an
-/// unchanged file is neither re-embedded nor charged.
+/// shortened file's removed tail is deleted (its rent stops). An unchanged
+/// file is neither re-embedded nor charged only under a deterministic
+/// chunking strategy; under a story_beats or generative voice every send
+/// re-embeds and charges every chunk (ENS-8356).
 fn ingest_request(corpus_id: String, docs: Vec<IngestDocument>, voice_id: String) -> IngestRequest {
     IngestRequest {
         corpus_id,
@@ -472,7 +474,8 @@ mod tests {
     // replace with an equal id, content, metadata and fingerprint. Whether the
     // server then embeds nothing depends on its stored rows (developer
     // persist.rs :461-:470): rows written by an older chunker or model are
-    // re-embedded once on the first replace send.
+    // re-embedded once on the first replace send, and under a story_beats or
+    // generative voice every chunk is re-embedded on every send (ENS-8356).
     #[test]
     fn ens8269_unchanged_file_is_resent_under_replace_byte_equal() {
         let root = ens8269_dir("unchanged");
@@ -486,8 +489,8 @@ mod tests {
     }
 
     // ENS-8269 (3): two files, one edited: both are sent under replace, and
-    // the unedited one is equal to its first send, so only the edited one is
-    // re-embedded.
+    // the unedited one is equal to its first send, so under a deterministic
+    // chunking strategy only the edited one is re-embedded (ENS-8356).
     #[test]
     fn ens8269_two_files_one_edited_both_sent_under_replace() {
         let root = ens8269_dir("two");

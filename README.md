@@ -45,7 +45,7 @@ enscrive-docs serve --port 8080       # serve HTML + /search JSON + /llms.txt
 Additional verbs:
 
 ```bash
-enscrive-docs ingest                  # re-ingest (idempotent; unchanged files skip)
+enscrive-docs ingest                  # re-ingest (unchanged files skip under a deterministic chunking strategy; a story_beats or generative voice re-embeds every chunk, ENS-8356)
 enscrive-docs search "query"          # one-shot neural search from the CLI
 enscrive-docs voice tune <voice>      # edit voice config in $EDITOR, PUT back
 enscrive-docs reset --yes             # delete + rebuild the corpus

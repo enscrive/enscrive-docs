@@ -803,4 +803,141 @@ mod tests {
         assert!(mock.count("GET", "/v1/corpora") >= 1, "the live path resolved the corpus ids");
         assert_eq!(mock.count("POST", "/v1/ingest"), 0, "no ingest request is sent");
     }
+
+    // R3283 (1): one `[[corpora]]` entry per (name, root, files), in order;
+    // each file holds "<root> <file>".
+    fn ens8269_matrix_config(
+        dir: &std::path::Path,
+        entries: &[(&str, &str, &[&str])],
+    ) -> std::path::PathBuf {
+        let mut config = String::from("[site]\ntitle = \"ens8269\"\n");
+        for (name, root, files) in entries {
+            std::fs::create_dir_all(dir.join(root)).expect("create root");
+            for file in *files {
+                std::fs::write(dir.join(root).join(file), format!("{root} {file}\n"))
+                    .expect("write file");
+            }
+            config.push_str(&format!(
+                "\n[[corpora]]\nname = \"{name}\"\nvoice = \"neutral\"\npath = \"{root}\"\n"
+            ));
+        }
+        config.push_str("\n[[voices]]\nname = \"neutral\"\nchunking_strategy = \"paragraph\"\n");
+        let path = dir.join("enscrive-docs.toml");
+        std::fs::write(&path, config).expect("write config");
+        path
+    }
+
+    // R3283 (1): ONE live matrix over the guard's key (target, document id,
+    // the whole run). Every case runs `run` live against its own mock; a case
+    // that fails is NAMED in the one panic, so a mutant's red set reads by
+    // case name.
+    // Refusals, 2 x 2 x 2: order (adjacent; non-adjacent, a third corpus
+    // between) x files per root (one; two) x target (the same name; two names
+    // that resolve to one corpus id). Each expects the refusal and zero
+    // POST /v1/ingest.
+    // Controls that must SEND, corpus and document ids pinned: two corpora
+    // with the same file name; ONE corpus with two different files.
+    #[tokio::test]
+    async fn ens8269_live_matrix_refuses_every_duplicate_key_and_sends_the_controls() {
+        const ONE: &[&str] = &["intro.md"];
+        const TWO: &[&str] = &["intro.md", "setup.md"];
+        const GUIDE: &[&str] = &["guide.md"];
+        const SETUP: &[&str] = &["setup.md"];
+        let mut failed: Vec<String> = Vec::new();
+
+        for (order, nonadjacent) in [("adjacent", false), ("nonadjacent", true)] {
+            for (per_root, files) in [("one", ONE), ("two", TWO)] {
+                for (target, second, corpora) in [
+                    (
+                        "same_name",
+                        "docs",
+                        &[("docs", "corpus-docs"), ("guides", "corpus-guides")][..],
+                    ),
+                    (
+                        "two_names_one_id",
+                        "handbook",
+                        &[
+                            ("docs", "corpus-shared"),
+                            ("handbook", "corpus-shared"),
+                            ("guides", "corpus-guides"),
+                        ][..],
+                    ),
+                ] {
+                    let case = format!("{order}/{per_root}/{target}");
+                    let mut entries: Vec<(&str, &str, &[&str])> = vec![("docs", "root-a", files)];
+                    if nonadjacent {
+                        entries.push(("guides", "root-c", GUIDE));
+                    }
+                    entries.push((second, "root-b", files));
+                    let dir = ens8269_dir(&format!("matrix-{order}-{per_root}-{target}"));
+                    let config_path = ens8269_matrix_config(&dir, &entries);
+                    let mock = ens8269_mock(corpora);
+                    let result = ens8269_live_run(&config_path, &mock).await;
+                    std::fs::remove_dir_all(&dir).ok();
+                    let posts = mock.count("POST", "/v1/ingest");
+                    let resolved = mock.count("GET", "/v1/corpora");
+                    let refused = matches!(&result, Err(e) if e.contains("refusing to ingest"));
+                    if !refused || posts != 0 || resolved == 0 {
+                        failed.push(format!(
+                            "{case}: result={result:?} ingest_posts={posts} corpora_gets={resolved}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        for (case, entries, corpora, want) in [
+            (
+                "control/two_corpora_same_file_name",
+                &[("docs", "root-a", ONE), ("guides", "root-b", ONE)][..],
+                &[("docs", "corpus-docs"), ("guides", "corpus-guides")][..],
+                &[
+                    ("corpus-docs", "intro.md", "root-a intro.md"),
+                    ("corpus-guides", "intro.md", "root-b intro.md"),
+                ][..],
+            ),
+            (
+                "control/one_corpus_two_different_files",
+                &[("docs", "root-a", ONE), ("docs", "root-b", SETUP)][..],
+                &[("docs", "corpus-docs")][..],
+                &[
+                    ("corpus-docs", "intro.md", "root-a intro.md"),
+                    ("corpus-docs", "setup.md", "root-b setup.md"),
+                ][..],
+            ),
+        ] {
+            let dir = ens8269_dir(&case.replace('/', "-"));
+            let config_path = ens8269_matrix_config(&dir, entries);
+            let mock = ens8269_mock(corpora);
+            let result = ens8269_live_run(&config_path, &mock).await;
+            std::fs::remove_dir_all(&dir).ok();
+            let got: Vec<(String, usize, String, String)> = mock
+                .ingest_bodies()
+                .iter()
+                .map(|body| {
+                    (
+                        body["corpus_id"].as_str().unwrap_or("").to_string(),
+                        body["documents"].as_array().map_or(0, Vec::len),
+                        body["documents"][0]["id"].as_str().unwrap_or("").to_string(),
+                        body["documents"][0]["content"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect();
+            let sent_as_pinned = result.is_ok()
+                && got.len() == want.len()
+                && got.iter().zip(want.iter()).all(
+                    |((corpus, docs, id, content), (want_corpus, want_id, want_text))| {
+                        corpus == want_corpus
+                            && *docs == 1
+                            && id == want_id
+                            && content.contains(want_text)
+                    },
+                );
+            if !sent_as_pinned {
+                failed.push(format!("{case}: result={result:?} ingest_requests={got:?}"));
+            }
+        }
+
+        assert!(failed.is_empty(), "ENS-8269 R3283 matrix cases failed: {failed:#?}");
+    }
 }

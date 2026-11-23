@@ -339,6 +339,47 @@ mod tests {
         .expect("request serializes")
     }
 
+    // ENS-8269 (R3261): a config with two `[[corpora]]` entries, rooted at
+    // `root-a` and `root-b`, each holding a different `intro.md`. `first` and
+    // `second` name each entry's corpus.
+    fn ens8269_two_root_config(
+        dir: &std::path::Path,
+        first: &str,
+        second: &str,
+    ) -> std::path::PathBuf {
+        for root in ["root-a", "root-b"] {
+            std::fs::create_dir_all(dir.join(root)).expect("create root");
+            std::fs::write(dir.join(root).join("intro.md"), format!("{root} intro\n"))
+                .expect("write intro.md");
+        }
+        let config = format!(
+            "[site]\ntitle = \"ens8269\"\n\n\
+             [[corpora]]\nname = \"{first}\"\nvoice = \"neutral\"\npath = \"root-a\"\n\n\
+             [[corpora]]\nname = \"{second}\"\nvoice = \"neutral\"\npath = \"root-b\"\n\n\
+             [[voices]]\nname = \"neutral\"\nchunking_strategy = \"paragraph\"\n"
+        );
+        let path = dir.join("enscrive-docs.toml");
+        std::fs::write(&path, config).expect("write config");
+        path
+    }
+
+    // `--dry-run` sends nothing and resolves nothing remotely, at every head.
+    async fn ens8269_dry_run(config_path: &std::path::Path) -> Result<(), String> {
+        let global = crate::global::GlobalArgs {
+            config_path: Some(config_path.to_path_buf()),
+            api_key: None,
+            endpoint: None,
+            embedding_provider_key: None,
+            profile: None,
+        };
+        let args = super::IngestArgs {
+            corpus: None,
+            dry_run: true,
+            force: false,
+        };
+        super::run(global, args).await
+    }
+
     #[test]
     fn warning_lines_redact_provider_key_shapes() {
         let provider_key = format!("{}{}", "sk-ant-api03-", "abcdefghijklmnop");
@@ -410,5 +451,33 @@ mod tests {
             second["documents"][1]["fingerprint"],
             first["documents"][1]["fingerprint"]
         );
+    }
+
+    // ENS-8269 (R3261): two configured roots that target ONE corpus and each
+    // hold `intro.md` send the same document id. Under replace the later send
+    // deletes the earlier one's content, so the run is refused before any
+    // request, naming both roots and the id. Red before the fix: the run
+    // returns Ok.
+    #[tokio::test]
+    async fn ens8269_two_roots_one_corpus_same_document_id_refuse_the_run() {
+        let dir = ens8269_dir("collide");
+        let config_path = ens8269_two_root_config(&dir, "docs", "docs");
+        let result = ens8269_dry_run(&config_path).await;
+        std::fs::remove_dir_all(&dir).ok();
+        let err = result.expect_err("a duplicate (corpus, document id) must refuse the run");
+        assert!(err.contains("intro.md"), "names the document id: {err}");
+        assert!(err.contains("root-a"), "names the first root: {err}");
+        assert!(err.contains("root-b"), "names the second root: {err}");
+    }
+
+    // Control: the same file name under two roots that target TWO corpora is
+    // not a collision; the run goes on.
+    #[tokio::test]
+    async fn ens8269_two_roots_two_corpora_same_file_name_both_go_on() {
+        let dir = ens8269_dir("twocorpora");
+        let config_path = ens8269_two_root_config(&dir, "docs", "guides");
+        let result = ens8269_dry_run(&config_path).await;
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(result, Ok(()));
     }
 }
